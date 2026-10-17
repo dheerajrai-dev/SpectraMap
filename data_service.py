@@ -3,7 +3,64 @@ data_service.py — OpenCellID data fetching, normalization, and cache
 """
 
 from datetime import datetime, timezone
+import math
 from typing import Any
+
+EARTH_RADIUS_METRES = 6_371_000.0
+
+
+def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """
+    Calculate great-circle distance between two coordinates in metres.
+    Uses the Haversine formula on a spherical Earth (radius 6,371,000 m).
+    """
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+
+    a = (
+        math.sin(delta_phi / 2.0) ** 2
+        + math.cos(phi1) * math.cos(phi2) * (math.sin(delta_lambda / 2.0) ** 2)
+    )
+    a = min(1.0, max(0.0, a))
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+    return EARTH_RADIUS_METRES * c
+
+
+def calculate_bounding_box(
+    center_lat: float, center_lon: float, radius_m: float
+) -> tuple[float, float, float, float]:
+    """
+    Compute bounding box (latmin, lonmin, latmax, lonmax) encompassing radius_m.
+    Accounts for meridian convergence (longitude degree length = 111,139 * cos(lat)).
+    """
+    delta_lat = radius_m / 111_139.0
+    lat_rad = math.radians(center_lat)
+    cos_lat = math.cos(lat_rad)
+    delta_lon = radius_m / (111_139.0 * cos_lat) if abs(cos_lat) > 1e-6 else radius_m / 111_139.0
+
+    latmin = max(-90.0, center_lat - delta_lat)
+    latmax = min(90.0, center_lat + delta_lat)
+    lonmin = max(-180.0, center_lon - delta_lon)
+    lonmax = min(180.0, center_lon + delta_lon)
+
+    return latmin, lonmin, latmax, lonmax
+
+
+def filter_records_by_radius(
+    records: list[dict[str, Any]],
+    center_lat: float,
+    center_lon: float,
+    radius_m: float,
+) -> list[dict[str, Any]]:
+    """
+    Filter normalized records to those within radius_m of (center_lat, center_lon).
+    """
+    return [
+        r for r in records
+        if haversine_distance(center_lat, center_lon, r["latitude"], r["longitude"]) <= radius_m
+    ]
 
 
 def validate_cell_record(raw: dict[str, Any]) -> bool:

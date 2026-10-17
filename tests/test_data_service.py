@@ -3,6 +3,9 @@ from data_service import (
     validate_cell_record,
     normalize_cell_record,
     parse_opencellid_response,
+    haversine_distance,
+    calculate_bounding_box,
+    filter_records_by_radius,
 )
 
 
@@ -93,3 +96,59 @@ def test_parse_opencellid_response_malformed():
     records, warnings = parse_opencellid_response("not a dict")
     assert records == []
     assert "Invalid response format" in warnings[0]
+
+
+def test_haversine_distance_same_point():
+    assert haversine_distance(28.6139, 77.2090, 28.6139, 77.2090) == 0.0
+
+
+def test_haversine_distance_known_landmarks():
+    # London (51.5074, -0.1278) to Paris (48.8566, 2.3522) ~ 343.5 km
+    dist_london_paris = haversine_distance(51.5074, -0.1278, 48.8566, 2.3522)
+    assert 340_000 < dist_london_paris < 350_000
+
+    # New Delhi (28.6139, 77.2090) to Mumbai (19.0760, 72.8777) ~ 1148 km
+    dist_delhi_mumbai = haversine_distance(28.6139, 77.2090, 19.0760, 72.8777)
+    assert 1_140_000 < dist_delhi_mumbai < 1_160_000
+
+
+def test_haversine_meridian_convergence():
+    # 1 deg lon at equator vs 1 deg lon at 60 deg lat
+    dist_equator = haversine_distance(0.0, 0.0, 0.0, 1.0)
+    dist_60deg = haversine_distance(60.0, 0.0, 60.0, 1.0)
+    # At 60 degrees latitude, cos(60 deg) = 0.5, so distance should be roughly half
+    assert 110_000 < dist_equator < 112_000
+    assert 55_000 < dist_60deg < 56_500
+    assert abs(dist_60deg - (dist_equator * 0.5)) < 1000
+
+
+def test_calculate_bounding_box():
+    lat, lon = 28.6139, 77.2090
+    radius = 1000.0  # 1 km
+    latmin, lonmin, latmax, lonmax = calculate_bounding_box(lat, lon, radius)
+
+    assert latmin < lat < latmax
+    assert lonmin < lon < lonmax
+
+    # North point (latmax, lon) should be approximately 1 km away
+    d_north = haversine_distance(lat, lon, latmax, lon)
+    assert abs(d_north - radius) < 15.0
+
+    # East point (lat, lonmax) should be approximately 1 km away
+    d_east = haversine_distance(lat, lon, lat, lonmax)
+    assert abs(d_east - radius) < 15.0
+
+
+def test_filter_records_by_radius():
+    center_lat, center_lon = 28.6139, 77.2090
+    # ~0.003 degrees is ~333 metres (inside 500m)
+    inside_record = {"latitude": center_lat + 0.003, "longitude": center_lon, "cell_id": 1}
+    # ~0.009 degrees is ~1000 metres (outside 500m)
+    outside_record = {"latitude": center_lat + 0.009, "longitude": center_lon, "cell_id": 2}
+
+    records = [inside_record, outside_record]
+    filtered = filter_records_by_radius(records, center_lat, center_lon, radius_m=500.0)
+
+    assert len(filtered) == 1
+    assert filtered[0]["cell_id"] == 1
+
