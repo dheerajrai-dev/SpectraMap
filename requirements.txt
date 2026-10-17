@@ -1,0 +1,21 @@
+# SpectraMap dependencies
+# Install with: pip install -r requirements.txt
+
+# Web framework and server
+fastapi
+uvicorn[standard]
+
+# HTTP client (for OpenCellID API calls)
+httpx
+
+# Environment variable loading
+python-dotenv
+
+# Graph algorithms
+networkx
+
+# Data normalization
+pandas
+
+# Testing
+pytest

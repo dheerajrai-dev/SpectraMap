@@ -1,4 +1,8 @@
 
+# App-managed cache (cell records, API responses, cache metadata)
+# Never commit — may contain location-adjacent data or large API payloads.
+data/
+
 # Python
 __pycache__/
 *.py[cod]
