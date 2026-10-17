@@ -1,21 +1,23 @@
 # SpectraMap dependencies
 # Install with: pip install -r requirements.txt
+#
+# Versions pinned from verified working environment (Python 3.14.0, Windows).
 
 # Web framework and server
-fastapi
-uvicorn[standard]
+fastapi==0.143.3
+uvicorn[standard]==0.54.0
 
 # HTTP client (for OpenCellID API calls)
-httpx
+httpx==0.28.1
 
-# Environment variable loading
-python-dotenv
+# Environment variable loading (.env file)
+python-dotenv==1.2.4
 
 # Graph algorithms
-networkx
+networkx==3.7
 
 # Data normalization
-pandas
+pandas==3.0.6
 
 # Testing
-pytest
+pytest==9.1.1
