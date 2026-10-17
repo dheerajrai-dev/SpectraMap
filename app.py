@@ -2,37 +2,73 @@
 app.py — SpectraMap FastAPI application
 
 Serves the static frontend and exposes the JSON API.
-API routes added per phase:
-    GET  /api/status   — Phase 2 (this file)
-    GET  /api/cells    — Phase 3
-    POST /api/optimize — Phase 5
+API routes:
+    GET  /api/status   — Application readiness
+    GET  /api/cells    — Nearby cell records for given lat/lon and radius
+    POST /api/optimize — Run graph coloring algorithms (Phase 5)
 """
 
-from fastapi import FastAPI
+import os
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
+from data_service import fetch_opencellid_records, ATTRIBUTION_TEXT
+
+# Load environment variables from .env file
+load_dotenv()
+
 app = FastAPI(title="SpectraMap", version="1.0-dev")
 
-# Serve static/ under the /static URL prefix.
-# e.g. static/style.css → http://localhost:8000/static/style.css
+# Serve frontend static assets under the /static URL prefix
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 @app.get("/")
 async def root():
-    """Serve the frontend page."""
+    """Serve the frontend HTML page."""
     return FileResponse("static/index.html")
 
 
 @app.get("/api/status")
 async def get_status():
-    """
-    Health check. Returns application readiness.
-    Later phases will add cache state and data-source connectivity.
-    """
+    """Health check endpoint returning application readiness."""
     return {
         "status": "ok",
         "app": "SpectraMap",
         "version": "1.0-dev",
+    }
+
+
+@app.get("/api/cells")
+async def get_cells(
+    lat: float = Query(..., ge=-90.0, le=90.0, description="Center latitude in degrees"),
+    lon: float = Query(..., ge=-180.0, le=180.0, description="Center longitude in degrees"),
+    radius_m: float = Query(1000.0, gt=0, le=5000.0, description="Search radius in metres"),
+):
+    """
+    Fetch nearby cell records from OpenCellID around (lat, lon) within radius_m.
+    Validates input parameters, checks API credentials, and returns normalized cells.
+    """
+    # 1. Retrieve the server-side API key from environment variables
+    api_key = os.getenv("OPENCELLID_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="OpenCellID API key is not configured on the server. Please set OPENCELLID_API_KEY in .env.",
+        )
+
+    # 2. Fetch and filter records via data_service
+    cells, warnings = await fetch_opencellid_records(lat, lon, radius_m, api_key)
+
+    # 3. Return standardized API response
+    return {
+        "center": {"latitude": lat, "longitude": lon},
+        "radius_m": radius_m,
+        "count": len(cells),
+        "cells": cells,
+        "warnings": warnings,
+        "attribution": ATTRIBUTION_TEXT,
+        "cached": False,
     }

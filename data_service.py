@@ -5,9 +5,12 @@ data_service.py — OpenCellID data fetching, normalization, and cache
 from datetime import datetime, timezone
 import math
 from typing import Any
+import httpx
 
 # Mean radius of Earth in metres used for great-circle distance calculations
 EARTH_RADIUS_METRES = 6_371_000.0
+OPENCELLID_AREA_URL = "https://opencellid.org/cell/getInArea"
+ATTRIBUTION_TEXT = "Cell tower data from OpenCellID, licensed under CC BY-SA 4.0."
 
 
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -170,3 +173,56 @@ def parse_opencellid_response(payload: Any) -> tuple[list[dict[str, Any]], list[
             warnings.append(f"Rejected invalid cell record: cellid={raw.get('cellid')}")
 
     return records, warnings
+
+
+async def fetch_opencellid_records(
+    center_lat: float,
+    center_lon: float,
+    radius_m: float,
+    api_key: str,
+    client: httpx.AsyncClient | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """
+    Fetch, parse, and radius-filter cell records from OpenCellID around a geographic center.
+    """
+    # 1. Calculate bounding box for the requested radius
+    latmin, lonmin, latmax, lonmax = calculate_bounding_box(center_lat, center_lon, radius_m)
+    bbox_str = f"{latmin:.4f},{lonmin:.4f},{latmax:.4f},{lonmax:.4f}"
+
+    params = {
+        "key": api_key,
+        "BBOX": bbox_str,
+        "format": "json",
+    }
+
+    should_close = False
+    if client is None:
+        client = httpx.AsyncClient(timeout=10.0)
+        should_close = True
+
+    try:
+        # 2. Query OpenCellID area endpoint
+        response = await client.get(OPENCELLID_AREA_URL, params=params)
+        if response.status_code != 200:
+            return [], [f"OpenCellID HTTP {response.status_code}: {response.text}"]
+
+        # 3. Parse and normalize records
+        payload = response.json()
+        records, warnings = parse_opencellid_response(payload)
+
+        # 4. Filter records strictly within the circle
+        filtered = filter_records_by_radius(records, center_lat, center_lon, radius_m)
+
+        # 5. Check if provider hit its 50-record cap
+        if len(payload.get("cells", [])) >= 50:
+            warnings.append(
+                "Reached OpenCellID 50-record limit for area query; results may be partial."
+            )
+
+        return filtered, warnings
+    except httpx.RequestError as exc:
+        return [], [f"OpenCellID connection error: {str(exc)}"]
+    finally:
+        if should_close:
+            await client.aclose()
+

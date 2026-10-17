@@ -1,3 +1,4 @@
+import httpx
 import pytest
 from data_service import (
     validate_cell_record,
@@ -6,6 +7,7 @@ from data_service import (
     haversine_distance,
     calculate_bounding_box,
     filter_records_by_radius,
+    fetch_opencellid_records,
 )
 
 
@@ -151,4 +153,42 @@ def test_filter_records_by_radius():
 
     assert len(filtered) == 1
     assert filtered[0]["cell_id"] == 1
+
+
+@pytest.mark.anyio
+async def test_fetch_opencellid_records_mock_success(valid_raw_cell):
+    def mock_handler(request: httpx.Request):
+        assert "key=test_key" in str(request.url)
+        return httpx.Response(200, json={"count": 1, "cells": [valid_raw_cell]})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(mock_handler))
+    cells, warnings = await fetch_opencellid_records(
+        center_lat=28.63,
+        center_lon=77.22,
+        radius_m=1000.0,
+        api_key="test_key",
+        client=client,
+    )
+    assert len(cells) == 1
+    assert cells[0]["cell_id"] == 204868614
+    assert warnings == []
+
+
+@pytest.mark.anyio
+async def test_fetch_opencellid_records_mock_http_error():
+    def mock_handler(request: httpx.Request):
+        return httpx.Response(403, text="Invalid API key")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(mock_handler))
+    cells, warnings = await fetch_opencellid_records(
+        center_lat=28.63,
+        center_lon=77.22,
+        radius_m=1000.0,
+        api_key="bad_key",
+        client=client,
+    )
+    assert cells == []
+    assert len(warnings) == 1
+    assert "OpenCellID HTTP 403" in warnings[0]
+
 
