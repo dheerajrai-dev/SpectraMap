@@ -383,3 +383,65 @@ html, body {
         height: 55vh;
     }
 }
+
+/* Custom Leaflet popup styling */
+.leaflet-popup-content-wrapper {
+    background-color: rgba(15, 23, 42, 0.95) !important;
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--border-color) !important;
+    border-radius: 8px !important;
+    color: var(--text-primary) !important;
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5) !important;
+}
+
+.leaflet-popup-tip {
+    background-color: rgba(15, 23, 42, 0.95) !important;
+    border: 1px solid var(--border-color) !important;
+}
+
+.leaflet-popup-content {
+    margin: 12px 14px !important;
+    line-height: 1.4 !important;
+}
+
+.tower-popup-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 6px;
+    margin-bottom: 8px;
+}
+
+.tower-popup-title {
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.radio-badge {
+    font-size: 0.65rem;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background-color: #0284c7;
+    color: #ffffff;
+    text-transform: uppercase;
+}
+
+.tower-popup-details {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 8px;
+    font-size: 0.75rem;
+}
+
+.tower-popup-details .label {
+    color: var(--text-secondary);
+}
+
+.tower-popup-details .val {
+    color: var(--text-primary);
+    font-weight: 500;
+}
