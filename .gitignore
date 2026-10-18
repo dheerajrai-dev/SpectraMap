@@ -26,3 +26,5 @@ Thumbs.db
 # Agent configuration and working folders
 .agents/
 .agent/
+
+decision.md
