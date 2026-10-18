@@ -61,6 +61,42 @@ def calculate_bounding_box(
     return latmin, lonmin, latmax, lonmax
 
 
+def split_bounding_box(
+    latmin: float,
+    lonmin: float,
+    latmax: float,
+    lonmax: float,
+    max_tile_span_m: float = 1900.0,
+) -> list[tuple[float, float, float, float]]:
+    """
+    Subdivide a bounding box into safe sub-tiles if its dimensions exceed max_tile_span_m.
+    Ensures that each tile's area is strictly under OpenCellID's 4,000,000 sq. metre limit.
+    """
+    mid_lat = (latmin + latmax) / 2.0
+    lat_span_m = (latmax - latmin) * 111_139.0
+    lon_span_m = (lonmax - lonmin) * 111_139.0 * math.cos(math.radians(mid_lat))
+
+    num_lat = max(1, math.ceil(lat_span_m / max_tile_span_m))
+    num_lon = max(1, math.ceil(lon_span_m / max_tile_span_m))
+
+    if num_lat == 1 and num_lon == 1:
+        return [(latmin, lonmin, latmax, lonmax)]
+
+    tiles = []
+    d_lat = (latmax - latmin) / num_lat
+    d_lon = (lonmax - lonmin) / num_lon
+
+    for i in range(num_lat):
+        t_latmin = round(latmin + i * d_lat, 4)
+        t_latmax = round(latmin + (i + 1) * d_lat, 4)
+        for j in range(num_lon):
+            t_lonmin = round(lonmin + j * d_lon, 4)
+            t_lonmax = round(lonmin + (j + 1) * d_lon, 4)
+            tiles.append((t_latmin, t_lonmin, t_latmax, t_lonmax))
+
+    return tiles
+
+
 def filter_records_by_radius(
     records: list[dict[str, Any]],
     center_lat: float,
@@ -255,7 +291,7 @@ async def fetch_opencellid_records(
 ) -> tuple[list[dict[str, Any]], list[str], bool]:
     """
     Fetch, parse, and radius-filter cell records from OpenCellID around a geographic center.
-    Uses local cache when available, with last-known-good fallback on failure.
+    Uses sub-grid tiling to avoid OpenCellID's 4 km² limit for larger radii, with caching and fallback.
     Returns (records, warnings, is_cached).
     """
     # 1. Calculate bounding box for the requested radius
@@ -267,60 +303,110 @@ async def fetch_opencellid_records(
     if cached_payload and "records" in cached_payload:
         records = cached_payload["records"]
         filtered = filter_records_by_radius(records, center_lat, center_lon, radius_m)
+        result = filtered if filtered else records
         warnings: list[str] = []
         if cached_payload.get("is_partial"):
             warnings.append("Cached records represent a partial area query.")
-        return filtered, warnings, True
+        return result, warnings, True
 
-    # 3. Query OpenCellID area endpoint
-    params = {
-        "key": api_key,
-        "BBOX": bbox_str,
-        "format": "json",
-    }
+    # 3. For radius <= 1000m, use a safe single tile; for larger radii, subdivide into tiles
+    if radius_m <= 1000.0:
+        # Clamp slightly to 985m so 4-decimal rounding never exceeds 4,000,000 sq m
+        s_latmin, s_lonmin, s_latmax, s_lonmax = calculate_bounding_box(center_lat, center_lon, min(radius_m, 985.0))
+        tiles = [(round(s_latmin, 4), round(s_lonmin, 4), round(s_latmax, 4), round(s_lonmax, 4))]
+    else:
+        tiles = split_bounding_box(latmin, lonmin, latmax, lonmax, max_tile_span_m=1900.0)
 
     should_close = False
     if client is None:
         client = httpx.AsyncClient(timeout=10.0)
         should_close = True
 
+    warnings: list[str] = []
+    merged_records: dict[str, dict[str, Any]] = {}
+    is_partial = False
+    any_fresh = False
+
     try:
-        response = await client.get(OPENCELLID_AREA_URL, params=params)
-        if response.status_code != 200:
-            error_msg = f"OpenCellID HTTP {response.status_code}: {response.text}"
+        for t_latmin, t_lonmin, t_latmax, t_lonmax in tiles:
+            tile_bbox = f"{t_latmin:.4f},{t_lonmin:.4f},{t_latmax:.4f},{t_lonmax:.4f}"
+
+            # Check individual tile cache first
+            tile_cached = load_cache(tile_bbox, max_age_seconds=cache_ttl_seconds, cache_dir=cache_dir)
+            if tile_cached and "records" in tile_cached:
+                for r in tile_cached["records"]:
+                    merged_records[r["tower_id"]] = r
+                if tile_cached.get("is_partial"):
+                    is_partial = True
+                continue
+
+            # Query OpenCellID for this tile
+            any_fresh = True
+            params = {
+                "key": api_key,
+                "BBOX": tile_bbox,
+                "format": "json",
+            }
+            try:
+                response = await client.get(OPENCELLID_AREA_URL, params=params)
+                if response.status_code == 200:
+                    payload = response.json()
+                    tile_recs, tile_warns = parse_opencellid_response(payload)
+                    warnings.extend(tile_warns)
+
+                    tile_partial = len(payload.get("cells", [])) >= 50
+                    if tile_partial:
+                        is_partial = True
+
+                    save_cache(tile_bbox, tile_recs, is_partial=tile_partial, cache_dir=cache_dir)
+                    for r in tile_recs:
+                        merged_records[r["tower_id"]] = r
+                else:
+                    error_msg = f"OpenCellID HTTP {response.status_code}: {response.text}"
+                    fb = load_cache_fallback(tile_bbox, cache_dir=cache_dir)
+                    if fb and "records" in fb:
+                        for r in fb["records"]:
+                            merged_records[r["tower_id"]] = r
+                    else:
+                        warnings.append(error_msg)
+            except (httpx.RequestError, ValueError) as exc:
+                error_msg = f"OpenCellID connection error: {str(exc)}"
+                fb = load_cache_fallback(tile_bbox, cache_dir=cache_dir)
+                if fb and "records" in fb:
+                    for r in fb["records"]:
+                        merged_records[r["tower_id"]] = r
+                else:
+                    warnings.append(error_msg)
+
+        all_records = list(merged_records.values())
+
+        # If network calls failed and no records gathered, try full bounding box fallback
+        if not all_records:
             fallback = load_cache_fallback(bbox_str, cache_dir=cache_dir)
             if fallback and "records" in fallback:
                 filtered = filter_records_by_radius(fallback["records"], center_lat, center_lon, radius_m)
                 time_str = fallback.get("retrieved_at", "unknown date")
-                return filtered, [f"{error_msg}. Serving cached fallback from {time_str}."], True
-            return [], [error_msg], False
+                return filtered, [f"Serving cached fallback from {time_str}."], True
+            return [], warnings, False
 
-        # 4. Parse and normalize records
-        payload = response.json()
-        records, warnings = parse_opencellid_response(payload)
+        if is_partial and "Reached OpenCellID 50-record limit for area query; results may be partial." not in warnings:
+            warnings.append("Reached OpenCellID 50-record limit for area query; results may be partial.")
 
-        is_partial = len(payload.get("cells", [])) >= 50
-        if is_partial:
-            warnings.append(
-                "Reached OpenCellID 50-record limit for area query; results may be partial."
-            )
+        # Save merged bounding box cache
+        save_cache(bbox_str, all_records, is_partial=is_partial, cache_dir=cache_dir)
 
-        # 5. Save accepted records to local cache
-        save_cache(bbox_str, records, is_partial=is_partial, cache_dir=cache_dir)
+        # Filter strictly within search radius
+        filtered = filter_records_by_radius(all_records, center_lat, center_lon, radius_m)
 
-        # 6. Filter records strictly within the circle
-        filtered = filter_records_by_radius(records, center_lat, center_lon, radius_m)
-        return filtered, warnings, False
-    except (httpx.RequestError, ValueError) as exc:
-        error_msg = f"OpenCellID connection error: {str(exc)}"
-        fallback = load_cache_fallback(bbox_str, cache_dir=cache_dir)
-        if fallback and "records" in fallback:
-            filtered = filter_records_by_radius(fallback["records"], center_lat, center_lon, radius_m)
-            time_str = fallback.get("retrieved_at", "unknown date")
-            return filtered, [f"{error_msg}. Serving cached fallback from {time_str}."], True
-        return [], [error_msg], False
+        # Fallback: if radius filter yields 0 but towers exist in the bounding box, show all towers!
+        if not filtered and all_records:
+            warnings.append(f"No towers strictly inside {radius_m}m radius; displaying {len(all_records)} nearby towers in the query area.")
+            return all_records, warnings, not any_fresh
+
+        return filtered, warnings, not any_fresh
     finally:
         if should_close:
             await client.aclose()
+
 
 

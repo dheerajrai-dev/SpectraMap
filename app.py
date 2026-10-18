@@ -88,19 +88,23 @@ async def optimize_frequencies(request: OptimizeRequest):
     Build interference graph and run DSatur and Welsh–Powell optimization.
     Validates assignments, compares metrics, and returns map-ready results.
     """
-    api_key = os.getenv("OPENCELLID_API_KEY")
-    if not api_key:
-        raise HTTPException(
-            status_code=503,
-            detail="OpenCellID API key is not configured on the server. Please set OPENCELLID_API_KEY in .env.",
-        )
-
     lat = request.center.latitude
     lon = request.center.longitude
     radius_m = request.radius_m
 
-    # 1. Fetch or load cached cell records for the requested area
-    cells, warnings, is_cached = await fetch_opencellid_records(lat, lon, radius_m, api_key)
+    # 1. Use client-provided cell records if provided (e.g. demo grid); otherwise fetch from OpenCellID
+    if request.cells and len(request.cells) > 0:
+        cells = request.cells
+        warnings = ["Simulated / demo cell grid."]
+        is_cached = False
+    else:
+        api_key = os.getenv("OPENCELLID_API_KEY")
+        if not api_key:
+            raise HTTPException(
+                status_code=503,
+                detail="OpenCellID API key is not configured on the server. Please set OPENCELLID_API_KEY in .env.",
+            )
+        cells, warnings, is_cached = await fetch_opencellid_records(lat, lon, radius_m, api_key)
 
     # 2. Build the interference graph and measure build time
     t0 = time.perf_counter()

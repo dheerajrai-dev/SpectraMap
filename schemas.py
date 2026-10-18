@@ -5,6 +5,7 @@ These classes define the expected shape of incoming JSON requests.
 FastAPI uses them to automatically validate data types and geographic bounds.
 """
 
+from typing import Any
 from pydantic import BaseModel, Field
 
 
@@ -18,3 +19,4 @@ class OptimizeRequest(BaseModel):
     """Request body sent by the frontend when clicking 'Optimize Frequencies'."""
     center: CenterCoordinates
     radius_m: float = Field(1000.0, gt=0, le=5000.0, description="Search radius in metres (max 5000m)")
+    cells: list[dict[str, Any]] | None = Field(default=None, description="Optional cell records list (for demo or pre-filtered grid)")

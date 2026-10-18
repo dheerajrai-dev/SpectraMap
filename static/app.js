@@ -4,8 +4,8 @@
  * Handles:
  * 1. Leaflet map initialization with OpenStreetMap tiles.
  * 2. Backend health check (/api/status).
- * 3. Area selection (dragging center marker, map click, geolocation, radius slider).
- * 4. Fetching cell tower records (/api/cells) and rendering interactive markers.
+ * 3. Area selection (dragging center marker, map click, geolocation, presets, radius slider).
+ * 4. Fetching cell tower records (/api/cells), sub-grid tiling, and rendering interactive markers.
  * 5. Optimization runner (/api/optimize), interference lines, marker coloring, and algorithm scoreboard.
  */
 
@@ -14,8 +14,8 @@ const state = {
     map: null,
     centerMarker: null,
     searchCircle: null,
-    currentCenter: { lat: 28.6000, lon: 77.2000 }, // Default: South Delhi (rich cellular data)
-    radiusMetres: 700,
+    currentCenter: { lat: 28.5224, lon: 77.1906 }, // Default: South Delhi (dense cellular cluster with 100+ towers)
+    radiusMetres: 1500,
     cells: [],
     cellsById: {},
     markersById: {},
@@ -40,6 +40,13 @@ const FREQUENCY_COLORS = [
     "#f97316", // Frequency 9: Orange
     "#64748b", // Frequency 10: Slate
 ];
+
+// Preset locations with rich, guaranteed cell tower density
+const PRESET_LOCATIONS = {
+    south_delhi: { lat: 28.5224, lon: 77.1906, name: "South Delhi (100+ Live Towers)" },
+    connaught_place: { lat: 28.6300, lon: 77.2180, name: "Connaught Place (Central Delhi)" },
+    mumbai: { lat: 18.9430, lon: 72.8250, name: "Mumbai (Marine Lines)" },
+};
 
 // Initialize application when DOM is ready
 document.addEventListener("DOMContentLoaded", () => {
@@ -74,6 +81,8 @@ function initMap() {
 
     // 5. Allow clicking on the map to change the search center
     state.map.on("click", (e) => {
+        const presetSelect = document.getElementById("preset-select");
+        if (presetSelect) presetSelect.value = "custom";
         setNewCenter(e.latlng.lat, e.latlng.lng);
     });
 }
@@ -91,6 +100,8 @@ function updateCenterVisuals(lat, lon) {
         // When the user drags the pin, update center coordinates
         state.centerMarker.on("dragend", (e) => {
             const pos = e.target.getLatLng();
+            const presetSelect = document.getElementById("preset-select");
+            if (presetSelect) presetSelect.value = "custom";
             setNewCenter(pos.lat, pos.lng);
         });
     } else {
@@ -141,10 +152,30 @@ function initControls() {
         });
     }
 
-    // "Use My Current Location" button (HTML5 Geolocation)
+    // Popular Presets dropdown
+    const presetSelect = document.getElementById("preset-select");
+    if (presetSelect) {
+        presetSelect.addEventListener("change", (e) => {
+            const val = e.target.value;
+            if (val !== "custom" && PRESET_LOCATIONS[val]) {
+                const loc = PRESET_LOCATIONS[val];
+                setNewCenter(loc.lat, loc.lon);
+                state.map.setView([loc.lat, loc.lon], 14);
+                fetchNearbyCells();
+            }
+        });
+    }
+
+    // "My GPS Location" button (HTML5 Geolocation)
     const btnLocate = document.getElementById("btn-locate");
     if (btnLocate) {
         btnLocate.addEventListener("click", handleGeolocation);
+    }
+
+    // "Demo Grid" button (Generates simulated towers anywhere)
+    const btnDemo = document.getElementById("btn-demo");
+    if (btnDemo) {
+        btnDemo.addEventListener("click", loadDemoTowers);
     }
 
     // "Fetch Nearby Towers" button
@@ -198,7 +229,7 @@ function handleGeolocation() {
     }
 
     if (statusMsg) {
-        statusMsg.textContent = "Locating your position...";
+        statusMsg.textContent = "Locating your position via GPS...";
         statusMsg.style.color = "var(--text-secondary)";
     }
 
@@ -206,21 +237,66 @@ function handleGeolocation() {
         (pos) => {
             const { latitude, longitude } = pos.coords;
             setNewCenter(latitude, longitude);
-            state.map.setView([latitude, longitude], 15);
+            state.map.setView([latitude, longitude], 14);
             if (statusMsg) {
-                statusMsg.textContent = "Location updated! Click 'Fetch Nearby Towers'.";
+                statusMsg.textContent = "Location updated to your coordinates! Click 'Fetch Nearby Towers'.";
                 statusMsg.style.color = "var(--accent-success)";
             }
         },
         (err) => {
             console.warn("Geolocation failed:", err.message);
             if (statusMsg) {
-                statusMsg.textContent = "Could not get location. Using manual map point.";
+                statusMsg.textContent = "Could not get GPS location. Using manual map point.";
                 statusMsg.style.color = "var(--accent-warning)";
             }
         },
         { timeout: 10000 }
     );
+}
+
+/**
+ * Generates simulated cellular towers around the current center.
+ * Ensures the user can test graph coloring anywhere, even if an area lacks OpenCellID data.
+ */
+function loadDemoTowers() {
+    const statusMsg = document.getElementById("cells-status");
+    const metricTowers = document.getElementById("metric-towers");
+    const btnOptimize = document.getElementById("btn-optimize");
+
+    const center = state.currentCenter;
+    const demoTowers = [];
+    const count = 12;
+
+    // Arrange 12 simulated towers in two concentric rings with overlapping coverage
+    for (let i = 0; i < count; i++) {
+        const isInner = i < 6;
+        const angle = ((i % 6) * 2 * Math.PI) / 6 + (isInner ? 0 : Math.PI / 6);
+        const dist = isInner ? 600 : 1200;
+        const dLat = (dist * Math.cos(angle)) / 111139.0;
+        const dLon = (dist * Math.sin(angle)) / (111139.0 * Math.cos((center.lat * Math.PI) / 180));
+
+        demoTowers.push({
+            tower_id: `DEMO_LTE_${i + 1}`,
+            cell_id: 900000 + (i + 1),
+            radio: i % 3 === 0 ? "5G NR" : "4G LTE",
+            latitude: Number((center.lat + dLat).toFixed(5)),
+            longitude: Number((center.lon + dLon).toFixed(5)),
+            range_m: 850.0,
+            mcc: 404,
+            mnc: 11,
+            lac: 50001,
+        });
+    }
+
+    state.cells = demoTowers;
+    renderCellTowers(demoTowers);
+
+    if (metricTowers) metricTowers.textContent = demoTowers.length;
+    resetOptimizationScoreboard();
+
+    statusMsg.textContent = `Generated ${demoTowers.length} simulated cellular towers with overlapping coverage. Click 'Optimize Frequencies'!`;
+    statusMsg.style.color = "var(--accent-success)";
+    if (btnOptimize) btnOptimize.disabled = false;
 }
 
 /**
@@ -235,7 +311,7 @@ async function fetchNearbyCells() {
     // Prevent concurrent requests
     btnFetch.disabled = true;
     btnFetch.textContent = "Fetching Cells...";
-    statusMsg.textContent = "Querying OpenCellID data...";
+    statusMsg.textContent = "Querying cell towers via sub-grid tiling...";
     statusMsg.style.color = "var(--text-secondary)";
 
     try {
@@ -260,13 +336,13 @@ async function fetchNearbyCells() {
         resetOptimizationScoreboard();
 
         if (state.cells.length === 0) {
-            statusMsg.textContent = "No cell towers found within this search radius. Try increasing the radius or choosing another area.";
+            statusMsg.innerHTML = "No crowd-sourced towers registered at this exact spot. <strong>Tip:</strong> Pick <em>'South Delhi (100+ Live Towers)'</em> or click <em>'⚡ Demo Grid'</em>!";
             statusMsg.style.color = "var(--accent-warning)";
             if (btnOptimize) btnOptimize.disabled = true;
         } else {
             let info = `Found ${state.cells.length} towers within ${state.radiusMetres}m.`;
             if (data.metadata?.is_partial) {
-                info += " (Warning: Max 50 records returned for this area).";
+                info += " (Results include 50-limit tile caps).";
             }
             if (data.metadata?.cached) {
                 info += " [Loaded from cache]";
@@ -347,6 +423,13 @@ function renderCellTowers(cells) {
         state.cellMarkersLayer.addLayer(marker);
         state.markersById[cell.tower_id] = marker;
     });
+
+    // Auto-fit map to show all rendered cell towers
+    const markerList = Object.values(state.markersById);
+    if (markerList.length > 0) {
+        const group = L.featureGroup(markerList);
+        state.map.fitBounds(group.getBounds().pad(0.12));
+    }
 }
 
 /**
@@ -369,6 +452,7 @@ async function runFrequencyOptimization() {
                 longitude: state.currentCenter.lon,
             },
             radius_m: state.radiusMetres,
+            cells: state.cells.length > 0 ? state.cells : null,
         };
 
         const res = await fetch("/api/optimize", {

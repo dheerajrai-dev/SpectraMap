@@ -30,24 +30,37 @@
             <section class="panel-section">
                 <h2>1. Area & Cell Towers</h2>
                 <div class="control-group">
-                    <button id="btn-locate" class="btn btn-secondary">
-                        <span class="icon">📍</span> Use My Current Location
+                    <label for="preset-select">Popular Locations / Presets:</label>
+                    <select id="preset-select">
+                        <option value="custom" selected>🎯 Custom / Map Click</option>
+                        <option value="south_delhi">📍 South Delhi (100+ Live Towers)</option>
+                        <option value="connaught_place">📍 Connaught Place (New Delhi)</option>
+                        <option value="mumbai">📍 Mumbai (Marine Lines)</option>
+                    </select>
+                </div>
+
+                <div class="control-group" style="display: flex; gap: 0.5rem; flex-direction: row;">
+                    <button id="btn-locate" class="btn btn-secondary" style="flex: 1;">
+                        <span class="icon">📍</span> My GPS Location
+                    </button>
+                    <button id="btn-demo" class="btn btn-secondary" style="flex: 1;" title="Generate simulated towers for testing anywhere">
+                        <span class="icon">⚡</span> Demo Grid
                     </button>
                 </div>
 
                 <div class="control-group">
                     <label for="radius-slider">
-                        Radius: <span id="radius-label">700</span> m
+                        Radius: <span id="radius-label">1500</span> m
                     </label>
                     <input
                         type="range"
                         id="radius-slider"
-                        min="300"
-                        max="1500"
-                        step="50"
-                        value="700"
+                        min="500"
+                        max="3000"
+                        step="100"
+                        value="1500"
                     />
-                    <small class="hint">Single OpenCellID queries are capped at ~800m (4 km² BBOX).</small>
+                    <small class="hint">Sub-grid tiling enables radii up to 3000m.</small>
                 </div>
 
                 <div class="control-group">
