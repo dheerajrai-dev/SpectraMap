@@ -3,6 +3,8 @@ from graph_engine import (
     build_interference_graph,
     get_graph_metrics,
     get_interference_edges,
+    validate_coloring,
+    color_welsh_powell,
 )
 
 
@@ -91,3 +93,75 @@ def test_get_interference_edges():
     assert edge["target_id"] in ["A", "B"]
     assert edge["source_coords"] == [28.6100, 77.2090] or edge["source_coords"] == [28.6120, 77.2090]
     assert edge["distance_m"] > 0
+
+
+def test_validator_detects_deliberate_conflict():
+    import networkx as nx
+    G = nx.Graph()
+    G.add_edge("A", "B")
+
+    # Deliberate conflict: adjacent nodes both assigned color 0
+    bad_coloring = {"A": 0, "B": 0}
+    val = validate_coloring(G, bad_coloring)
+    assert val["is_valid"] is False
+    assert val["conflict_count"] == 1
+    assert ("A", "B") in val["conflicts"] or ("B", "A") in val["conflicts"]
+
+
+def test_validator_detects_missing_node():
+    import networkx as nx
+    G = nx.Graph()
+    G.add_edge("A", "B")
+
+    # Missing node B
+    incomplete_coloring = {"A": 0}
+    val = validate_coloring(G, incomplete_coloring)
+    assert val["is_valid"] is False
+    assert val["missing_count"] == 1
+    assert "B" in val["missing_nodes"]
+
+
+def test_welsh_powell_path_graph():
+    # Path P3: A–B–C requires 2 colors (A:0, B:1, C:0)
+    import networkx as nx
+    G = nx.Graph()
+    G.add_edges_from([("A", "B"), ("B", "C")])
+
+    res = color_welsh_powell(G)
+    assert res["validation"]["is_valid"] is True
+    assert res["color_count"] == 2
+    assert res["coloring"]["A"] != res["coloring"]["B"]
+    assert res["coloring"]["B"] != res["coloring"]["C"]
+    assert res["coloring"]["A"] == res["coloring"]["C"]  # Same color reused!
+
+
+def test_welsh_powell_clique():
+    # Complete graph K4 requires exactly 4 colors
+    import networkx as nx
+    G = nx.complete_graph(4)
+
+    res = color_welsh_powell(G)
+    assert res["validation"]["is_valid"] is True
+    assert res["color_count"] == 4
+
+
+def test_welsh_powell_odd_cycle():
+    # Odd cycle C5 requires 3 colors
+    import networkx as nx
+    G = nx.cycle_graph(5)
+
+    res = color_welsh_powell(G)
+    assert res["validation"]["is_valid"] is True
+    assert res["color_count"] == 3
+
+
+def test_welsh_powell_deterministic():
+    # Ensure 10 runs produce identical assignments
+    import networkx as nx
+    G = nx.erdos_renyi_graph(20, 0.3, seed=42)
+
+    first_run = color_welsh_powell(G)["coloring"]
+    for _ in range(10):
+        subsequent_run = color_welsh_powell(G)["coloring"]
+        assert first_run == subsequent_run
+
