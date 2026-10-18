@@ -38,16 +38,19 @@ DSatur and Welsh–Powell to assign abstract frequency groups with zero conflict
 ```
 SpectraMap/
 ├── app.py              # FastAPI app: static serving + API routes
-├── data_service.py     # OpenCellID fetching, normalization, cache
+├── schemas.py          # Pydantic request models
+├── data_service.py     # OpenCellID fetching, geodesic math, cache
 ├── graph_engine.py     # Graph construction, DSatur, Welsh–Powell, validator
 ├── requirements.txt
 ├── data/               # App-managed cache (gitignored)
 ├── static/
-│   ├── index.html
-│   ├── style.css
-│   └── app.js
+│   ├── index.html      # Responsive dashboard layout & controls
+│   ├── style.css       # Dark theme, glassmorphism, responsive styles
+│   └── app.js          # Leaflet map, API integration, graph visualization
 ├── tests/
-│   └── test_graph_engine.py
+│   ├── test_app.py           # API endpoint integration tests
+│   ├── test_data_service.py  # Data validation, haversine, cache tests
+│   └── test_graph_engine.py  # Graph modeling, coloring, validation tests
 ├── docs/
 ├── .env.example
 └── .gitignore
@@ -81,11 +84,23 @@ uvicorn app:app --reload
 
 Obtain a free OpenCellID API key at https://opencellid.org.
 
+## Running Tests
+
+Run the complete test suite (50 automated unit and integration tests):
+
+```bash
+pytest -v
+```
+
 ## Attribution
 
 Cell tower data from [OpenCellID](https://opencellid.org), licensed under
-[CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).
+[ODbL 1.0](https://opendatacommons.org/licenses/odbl/1-0/) / [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).
 
 ## Project status
 
-Under active development. See `docs/` for the finalized PRD and system architecture.
+**Phase 1–7 Complete & Verified:**
+- FastAPI backend with input validation and local caching.
+- NetworkX interference graph generation and mathematical distance modeling.
+- Welsh-Powell and DSATUR graph coloring algorithms with independent collision validation.
+- Interactive Leaflet frontend with dark glassmorphism styling, live tower marker popups, interference lines, and comparison scoreboard.
