@@ -1,2 +1,385 @@
-/* style.css — SpectraMap styles
-   Implementation: Phase 6 (frontend fundamentals) */
+/*
+ * style.css — SpectraMap styling
+ * Clean, modern, responsive layout for the frequency optimization dashboard.
+ */
+
+:root {
+    --bg-main: #0f172a;       /* Slate 900 */
+    --bg-surface: #1e293b;    /* Slate 800 */
+    --bg-panel: #1e293b;
+    --border-color: #334155;  /* Slate 700 */
+    --text-primary: #f8fafc;  /* Slate 50 */
+    --text-secondary: #94a3b8;/* Slate 400 */
+    --accent-primary: #3b82f6;/* Blue 500 */
+    --accent-hover: #2563eb;  /* Blue 600 */
+    --accent-success: #10b981;/* Emerald 500 */
+    --accent-warning: #f59e0b;/* Amber 500 */
+    --accent-error: #ef4444;  /* Red 500 */
+    --font-stack: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+html, body {
+    height: 100%;
+    height: 100dvh;
+    font-family: var(--font-stack);
+    background-color: var(--bg-main);
+    color: var(--text-primary);
+    overflow: hidden;
+}
+
+/* Two-column layout: sidebar on left, full map on right */
+.app-layout {
+    display: flex;
+    height: 100%;
+    width: 100vw;
+}
+
+/* Sidebar styling */
+.sidebar {
+    width: 380px;
+    min-width: 320px;
+    max-width: 420px;
+    height: 100%;
+    background-color: var(--bg-surface);
+    border-right: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    z-index: 1000;
+}
+
+/* Header & Status */
+.app-header {
+    padding: 1.25rem;
+    border-bottom: 1px solid var(--border-color);
+    background-color: #0b1120;
+}
+
+.app-header h1 {
+    font-size: 1.35rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: -0.02em;
+}
+
+.app-header .subtitle {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-top: 0.25rem;
+}
+
+.badge {
+    display: inline-block;
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 0.2rem 0.5rem;
+    border-radius: 9999px;
+    margin-top: 0.5rem;
+}
+
+.badge-loading {
+    background-color: #1e293b;
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+}
+
+.badge-ok {
+    background-color: rgba(16, 185, 129, 0.15);
+    color: var(--accent-success);
+    border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.badge-error {
+    background-color: rgba(239, 68, 68, 0.15);
+    color: var(--accent-error);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+/* Panel Sections */
+.panel-section {
+    padding: 1.25rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.panel-section h2 {
+    font-size: 0.85rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--accent-primary);
+    margin-bottom: 0.85rem;
+}
+
+/* Form Controls & Buttons */
+.control-group {
+    margin-bottom: 0.85rem;
+    display: flex;
+    flex-direction: column;
+}
+
+.control-group label {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.35rem;
+}
+
+.control-group input[type="range"] {
+    width: 100%;
+    cursor: pointer;
+}
+
+.control-group select {
+    background-color: var(--bg-main);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.85rem;
+    outline: none;
+}
+
+.control-group select:focus {
+    border-color: var(--accent-primary);
+}
+
+.hint {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    margin-top: 0.25rem;
+}
+
+.checkbox-label {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+}
+
+.checkbox-label input[type="checkbox"] {
+    cursor: pointer;
+}
+
+/* Buttons */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 0.6rem 1rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    border-radius: 6px;
+    border: none;
+    cursor: pointer;
+    transition: background-color 0.15s ease, opacity 0.15s ease;
+}
+
+.btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.btn-primary {
+    background-color: var(--accent-primary);
+    color: #ffffff;
+}
+
+.btn-primary:hover:not(:disabled) {
+    background-color: var(--accent-hover);
+}
+
+.btn-secondary {
+    background-color: #334155;
+    color: var(--text-primary);
+}
+
+.btn-secondary:hover:not(:disabled) {
+    background-color: #475569;
+}
+
+.btn-accent {
+    background-color: var(--accent-success);
+    color: #042f2e;
+    font-weight: 700;
+}
+
+.btn-accent:hover:not(:disabled) {
+    background-color: #059669;
+    color: #ffffff;
+}
+
+/* Status Messages */
+.status-message {
+    font-size: 0.75rem;
+    margin-top: 0.5rem;
+    min-height: 1.2rem;
+    color: var(--text-secondary);
+}
+
+/* Metrics & Scoreboard Grid */
+.metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+}
+
+.metric-item {
+    background-color: var(--bg-main);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 0.6rem 0.75rem;
+    display: flex;
+    flex-direction: column;
+}
+
+.metric-label {
+    font-size: 0.68rem;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+}
+
+.metric-value {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-top: 0.2rem;
+}
+
+/* Scoreboard Table */
+.table-container {
+    overflow-x: auto;
+    margin-bottom: 1rem;
+}
+
+.scoreboard-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+    background-color: var(--bg-main);
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.scoreboard-table th,
+.scoreboard-table td {
+    padding: 0.5rem 0.65rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.scoreboard-table th {
+    background-color: #1e293b;
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+/* Color Legend */
+.legend-container {
+    margin-top: 0.75rem;
+}
+
+.legend-container h3 {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    margin-bottom: 0.4rem;
+}
+
+.legend-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+}
+
+.legend-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.2rem 0.45rem;
+    background-color: var(--bg-main);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    font-size: 0.7rem;
+}
+
+.legend-color-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+}
+
+/* Attribution Footer */
+.app-footer {
+    padding: 1rem 1.25rem;
+    margin-top: auto;
+    font-size: 0.68rem;
+    color: var(--text-secondary);
+    border-top: 1px solid var(--border-color);
+    line-height: 1.4;
+}
+
+.app-footer a {
+    color: var(--accent-primary);
+    text-decoration: none;
+}
+
+.app-footer a:hover {
+    text-decoration: underline;
+}
+
+/* Map Area */
+.map-area {
+    flex: 1;
+    height: 100%;
+    position: relative;
+    background-color: #0b1120;
+}
+
+.map-container {
+    width: 100%;
+    height: 100%;
+    z-index: 1;
+}
+
+.map-overlay {
+    position: absolute;
+    top: 1rem;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(15, 23, 42, 0.85);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--border-color);
+    padding: 0.5rem 1rem;
+    border-radius: 9999px;
+    font-size: 0.8rem;
+    color: var(--text-primary);
+    pointer-events: none;
+    z-index: 1001;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* Responsive adjustments for mobile/smaller screens */
+@media (max-width: 768px) {
+    .app-layout {
+        flex-direction: column-reverse;
+    }
+    .sidebar {
+        width: 100%;
+        max-width: 100%;
+        height: 45vh;
+        border-right: none;
+        border-top: 1px solid var(--border-color);
+    }
+    .map-area {
+        height: 55vh;
+    }
+}

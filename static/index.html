@@ -3,10 +3,168 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SpectraMap</title>
-    <!-- Implementation: Phase 6 (frontend fundamentals) -->
+    <title>SpectraMap — Cellular Frequency Optimization</title>
+
+    <!-- Leaflet 1.9.4 CSS from unpkg CDN -->
+    <link
+        rel="stylesheet"
+        href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+        crossorigin=""
+    />
+
+    <!-- Custom styling -->
+    <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-    <p>SpectraMap — frontend scaffold. Implementation coming in Phase 6.</p>
+    <div class="app-layout">
+        <!-- Sidebar: user controls, stats, and algorithm scoreboard -->
+        <aside class="sidebar">
+            <header class="app-header">
+                <h1>SpectraMap</h1>
+                <p class="subtitle">Cellular Frequency Optimization via Graph Coloring</p>
+                <div id="status-badge" class="badge badge-loading">Connecting...</div>
+            </header>
+
+            <!-- Step 1: Area & Location Selection -->
+            <section class="panel-section">
+                <h2>1. Area & Cell Towers</h2>
+                <div class="control-group">
+                    <button id="btn-locate" class="btn btn-secondary">
+                        <span class="icon">📍</span> Use My Current Location
+                    </button>
+                </div>
+
+                <div class="control-group">
+                    <label for="radius-slider">
+                        Radius: <span id="radius-label">1000</span> m
+                    </label>
+                    <input
+                        type="range"
+                        id="radius-slider"
+                        min="500"
+                        max="3000"
+                        step="100"
+                        value="1000"
+                    />
+                    <small class="hint">Higher radii take longer or require cached tiles.</small>
+                </div>
+
+                <div class="control-group">
+                    <button id="btn-fetch" class="btn btn-primary">
+                        Fetch Nearby Towers
+                    </button>
+                </div>
+
+                <div id="cells-status" class="status-message" aria-live="polite"></div>
+            </section>
+
+            <!-- Step 2: Optimization Controls -->
+            <section class="panel-section">
+                <h2>2. Frequency Optimization</h2>
+                <div class="control-group">
+                    <label for="algo-select">Algorithm:</label>
+                    <select id="algo-select">
+                        <option value="both" selected>Compare Both (Welsh-Powell & DSATUR)</option>
+                        <option value="welsh_powell">Welsh-Powell (Static Degree)</option>
+                        <option value="dsatur">DSATUR (Dynamic Saturation)</option>
+                    </select>
+                </div>
+
+                <div class="control-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="toggle-edges" checked />
+                        Show Interference Lines
+                    </label>
+                </div>
+
+                <div class="control-group">
+                    <button id="btn-optimize" class="btn btn-accent" disabled>
+                        Optimize Frequencies
+                    </button>
+                </div>
+            </section>
+
+            <!-- Step 3: Graph Metrics & Scoreboard -->
+            <section class="panel-section">
+                <h2>3. Results & Scoreboard</h2>
+                <div id="metrics-card" class="metrics-grid">
+                    <div class="metric-item">
+                        <span class="metric-label">Towers</span>
+                        <span id="metric-towers" class="metric-value">-</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Interference Edges</span>
+                        <span id="metric-edges" class="metric-value">-</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Max Degree</span>
+                        <span id="metric-degree" class="metric-value">-</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Density</span>
+                        <span id="metric-density" class="metric-value">-</span>
+                    </div>
+                </div>
+
+                <!-- Comparison Table -->
+                <div class="table-container">
+                    <table class="scoreboard-table">
+                        <thead>
+                            <tr>
+                                <th>Algorithm</th>
+                                <th>Frequencies</th>
+                                <th>Valid?</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>Welsh-Powell</td>
+                                <td id="res-wp-colors">-</td>
+                                <td id="res-wp-valid">-</td>
+                            </tr>
+                            <tr>
+                                <td>DSATUR</td>
+                                <td id="res-dsatur-colors">-</td>
+                                <td id="res-dsatur-valid">-</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Frequency Color Palette Legend -->
+                <div id="legend-container" class="legend-container" style="display: none;">
+                    <h3>Assigned Frequencies</h3>
+                    <div id="legend-items" class="legend-items"></div>
+                </div>
+            </section>
+
+            <!-- Legal Attribution Footer -->
+            <footer class="app-footer">
+                <p>
+                    Tower data: <a href="https://opencellid.org" target="_blank" rel="noopener">OpenCellID</a> (ODbL 1.0)<br />
+                    Map tiles: © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors
+                </p>
+            </footer>
+        </aside>
+
+        <!-- Main Map Area -->
+        <main class="map-area">
+            <div id="map" class="map-container"></div>
+            <div id="map-overlay" class="map-overlay">
+                Click map to select a search center or use "Use My Current Location"
+            </div>
+        </main>
+    </div>
+
+    <!-- Leaflet JS from unpkg CDN -->
+    <script
+        src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+        crossorigin=""
+    ></script>
+
+    <!-- Application frontend code -->
+    <script src="/static/app.js"></script>
 </body>
 </html>
