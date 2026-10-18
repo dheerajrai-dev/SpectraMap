@@ -1,12 +1,14 @@
 /**
  * app.js — SpectraMap frontend logic
  *
- * Handles:
- * 1. Leaflet map initialization with OpenStreetMap tiles.
+ * Professional Geospatial Analytics Dashboard:
+ * 1. Leaflet map management & auto-bounds.
  * 2. Backend health check (/api/status).
- * 3. Area selection (dragging center marker, map click, geolocation, presets, radius slider).
- * 4. Fetching cell tower records (/api/cells), sub-grid tiling, and rendering interactive markers.
- * 5. Optimization runner (/api/optimize), interference lines, marker coloring, and algorithm scoreboard.
+ * 3. Area selection (presets, drag pin, map click, geolocation, radius slider).
+ * 4. Cell tower data retrieval (/api/cells) with sub-grid tiling.
+ * 5. Optimization runner (/api/optimize) with dual heuristics (DSATUR & Welsh-Powell).
+ * 6. Dual visualization: Geographic Map View & Topology Graph Explorer.
+ * 7. Contextual vertex inspector and interactive channel isolator.
  */
 
 // Global state
@@ -14,7 +16,7 @@ const state = {
     map: null,
     centerMarker: null,
     searchCircle: null,
-    currentCenter: { lat: 28.5224, lon: 77.1906 }, // Default: South Delhi (dense cellular cluster with 100+ towers)
+    currentCenter: { lat: 28.5224, lon: 77.1906 }, // Default: South Delhi (dense cellular cluster)
     radiusMetres: 1500,
     cells: [],
     cellsById: {},
@@ -22,6 +24,9 @@ const state = {
     interferenceEdges: [],
     optimizationResults: null,
     activeAlgorithm: "both",
+    activeView: "map",
+    selectedTowerId: null,
+    isolatedFrequency: null,
     cellMarkersLayer: null,
     coverageCirclesLayer: null,
     edgesLayer: null,
@@ -63,6 +68,7 @@ function initMap() {
     state.map = L.map("map", {
         center: [state.currentCenter.lat, state.currentCenter.lon],
         zoom: 14,
+        zoomControl: true,
     });
 
     // 2. Add OpenStreetMap tile layer
@@ -113,7 +119,7 @@ function updateCenterVisuals(lat, lon) {
             radius: state.radiusMetres,
             color: "#3b82f6",
             fillColor: "#3b82f6",
-            fillOpacity: 0.1,
+            fillOpacity: 0.08,
             weight: 2,
             dashArray: "5, 5",
         }).addTo(state.map);
@@ -131,12 +137,12 @@ function setNewCenter(lat, lon) {
     updateCenterVisuals(lat, lon);
     const overlay = document.getElementById("map-overlay");
     if (overlay) {
-        overlay.textContent = `Center: ${state.currentCenter.lat}, ${state.currentCenter.lon} (Click 'Fetch Nearby Towers')`;
+        overlay.innerHTML = `<span>Center: ${state.currentCenter.lat.toFixed(5)}°, ${state.currentCenter.lon.toFixed(5)}° (Click 'Fetch Cell Records')</span>`;
     }
 }
 
 /**
- * Hooks up UI event listeners (slider, buttons, checkboxes, dropdowns).
+ * Hooks up UI event listeners (slider, buttons, checkboxes, dropdowns, tabs).
  */
 function initControls() {
     // Radius slider
@@ -190,6 +196,22 @@ function initControls() {
         btnOptimize.addEventListener("click", runFrequencyOptimization);
     }
 
+    // Toggle coverage halos checkbox
+    const toggleHalos = document.getElementById("toggle-halos");
+    if (toggleHalos) {
+        toggleHalos.addEventListener("change", (e) => {
+            if (e.target.checked) {
+                if (!state.map.hasLayer(state.coverageCirclesLayer)) {
+                    state.map.addLayer(state.coverageCirclesLayer);
+                }
+            } else {
+                if (state.map.hasLayer(state.coverageCirclesLayer)) {
+                    state.map.removeLayer(state.coverageCirclesLayer);
+                }
+            }
+        });
+    }
+
     // Toggle interference lines checkbox
     const toggleEdges = document.getElementById("toggle-edges");
     if (toggleEdges) {
@@ -216,6 +238,70 @@ function initControls() {
             }
         });
     }
+
+    // View Switcher (Map View vs Graph Topology)
+    const tabMapView = document.getElementById("tab-map-view");
+    const tabGraphView = document.getElementById("tab-graph-view");
+    const mapLayer = document.getElementById("map");
+    const graphLayer = document.getElementById("graph-canvas-container");
+
+    if (tabMapView && tabGraphView) {
+        tabMapView.addEventListener("click", () => {
+            tabMapView.classList.add("active");
+            tabMapView.setAttribute("aria-selected", "true");
+            tabGraphView.classList.remove("active");
+            tabGraphView.setAttribute("aria-selected", "false");
+            if (mapLayer) mapLayer.classList.add("active-layer");
+            if (graphLayer) graphLayer.classList.remove("active-layer");
+            state.activeView = "map";
+            setTimeout(() => state.map.invalidateSize(), 50);
+        });
+
+        tabGraphView.addEventListener("click", () => {
+            tabGraphView.classList.add("active");
+            tabGraphView.setAttribute("aria-selected", "true");
+            tabMapView.classList.remove("active");
+            tabMapView.setAttribute("aria-selected", "false");
+            if (graphLayer) graphLayer.classList.add("active-layer");
+            if (mapLayer) mapLayer.classList.remove("active-layer");
+            state.activeView = "graph";
+            renderGraphExplorer();
+        });
+    }
+
+    // Close Inspector button
+    const btnCloseInspector = document.getElementById("btn-close-inspector");
+    if (btnCloseInspector) {
+        btnCloseInspector.addEventListener("click", () => {
+            closeVertexInspector();
+        });
+    }
+
+    // Educational Guide Modal
+    const btnGuide = document.getElementById("btn-guide");
+    const guideModal = document.getElementById("guide-modal");
+    const btnCloseGuide = document.getElementById("btn-close-guide");
+    if (btnGuide && guideModal) {
+        btnGuide.addEventListener("click", () => {
+            guideModal.classList.add("open");
+            guideModal.setAttribute("aria-hidden", "false");
+        });
+    }
+    if (btnCloseGuide && guideModal) {
+        btnCloseGuide.addEventListener("click", () => {
+            guideModal.classList.remove("open");
+            guideModal.setAttribute("aria-hidden", "true");
+        });
+        guideModal.addEventListener("click", (e) => {
+            if (e.target === guideModal) {
+                guideModal.classList.remove("open");
+                guideModal.setAttribute("aria-hidden", "true");
+            }
+        });
+    }
+
+    // Initialize interactive Graph Topology Canvas handlers
+    initGraphCanvasInteractions();
 }
 
 /**
@@ -239,15 +325,15 @@ function handleGeolocation() {
             setNewCenter(latitude, longitude);
             state.map.setView([latitude, longitude], 14);
             if (statusMsg) {
-                statusMsg.textContent = "Location updated to your coordinates! Click 'Fetch Nearby Towers'.";
-                statusMsg.style.color = "var(--accent-success)";
+                statusMsg.textContent = "Location updated to your coordinates! Click 'Fetch Cell Records'.";
+                statusMsg.style.color = "var(--accent-emerald)";
             }
         },
         (err) => {
             console.warn("Geolocation failed:", err.message);
             if (statusMsg) {
                 statusMsg.textContent = "Could not get GPS location. Using manual map point.";
-                statusMsg.style.color = "var(--accent-warning)";
+                statusMsg.style.color = "var(--accent-amber)";
             }
         },
         { timeout: 10000 }
@@ -265,13 +351,13 @@ function loadDemoTowers() {
 
     const center = state.currentCenter;
     const demoTowers = [];
-    const count = 12;
+    const count = 14;
 
-    // Arrange 12 simulated towers in two concentric rings with overlapping coverage
+    // Arrange 14 simulated towers in two concentric rings with overlapping coverage
     for (let i = 0; i < count; i++) {
         const isInner = i < 6;
         const angle = ((i % 6) * 2 * Math.PI) / 6 + (isInner ? 0 : Math.PI / 6);
-        const dist = isInner ? 600 : 1200;
+        const dist = isInner ? 550 : 1150;
         const dLat = (dist * Math.cos(angle)) / 111139.0;
         const dLon = (dist * Math.sin(angle)) / (111139.0 * Math.cos((center.lat * Math.PI) / 180));
 
@@ -294,8 +380,8 @@ function loadDemoTowers() {
     if (metricTowers) metricTowers.textContent = demoTowers.length;
     resetOptimizationScoreboard();
 
-    statusMsg.textContent = `Generated ${demoTowers.length} simulated cellular towers with overlapping coverage. Click 'Optimize Frequencies'!`;
-    statusMsg.style.color = "var(--accent-success)";
+    statusMsg.textContent = `Generated ${demoTowers.length} simulated cellular towers with overlapping coverage. Ready to optimize!`;
+    statusMsg.style.color = "var(--accent-emerald)";
     if (btnOptimize) btnOptimize.disabled = false;
 }
 
@@ -308,7 +394,6 @@ async function fetchNearbyCells() {
     const btnOptimize = document.getElementById("btn-optimize");
     const metricTowers = document.getElementById("metric-towers");
 
-    // Prevent concurrent requests
     btnFetch.disabled = true;
     btnFetch.textContent = "Fetching Cells...";
     statusMsg.textContent = "Querying cell towers via sub-grid tiling...";
@@ -337,7 +422,7 @@ async function fetchNearbyCells() {
 
         if (state.cells.length === 0) {
             statusMsg.innerHTML = "No crowd-sourced towers registered at this exact spot. <strong>Tip:</strong> Pick <em>'South Delhi (100+ Live Towers)'</em> or click <em>'⚡ Demo Grid'</em>!";
-            statusMsg.style.color = "var(--accent-warning)";
+            statusMsg.style.color = "var(--accent-amber)";
             if (btnOptimize) btnOptimize.disabled = true;
         } else {
             let info = `Found ${state.cells.length} towers within ${state.radiusMetres}m.`;
@@ -348,22 +433,22 @@ async function fetchNearbyCells() {
                 info += " [Loaded from cache]";
             }
             statusMsg.textContent = info;
-            statusMsg.style.color = "var(--accent-success)";
+            statusMsg.style.color = "var(--accent-emerald)";
             if (btnOptimize) btnOptimize.disabled = false;
         }
     } catch (err) {
         console.error("Fetch cells failed:", err);
         statusMsg.textContent = `Error: ${err.message}`;
-        statusMsg.style.color = "var(--accent-error)";
+        statusMsg.style.color = "var(--accent-rose)";
         if (btnOptimize) btnOptimize.disabled = true;
     } finally {
         btnFetch.disabled = false;
-        btnFetch.textContent = "Fetch Nearby Towers";
+        btnFetch.textContent = "Fetch Cell Records";
     }
 }
 
 /**
- * Renders cell towers on the map as styled circle markers with interactive popups.
+ * Renders cell towers on the map with sector rosette dispersion for co-located cells.
  */
 function renderCellTowers(cells) {
     state.cellMarkersLayer.clearLayers();
@@ -371,33 +456,88 @@ function renderCellTowers(cells) {
     state.edgesLayer.clearLayers();
     state.markersById = {};
     state.cellsById = {};
+    state.coverageCirclesById = {};
+
+    // Group cells by physical mast location (rounded to 5 decimal places)
+    const mastGroups = {};
+    cells.forEach((cell) => {
+        const key = `${cell.latitude.toFixed(5)},${cell.longitude.toFixed(5)}`;
+        if (!mastGroups[key]) mastGroups[key] = [];
+        mastGroups[key].push(cell);
+    });
 
     cells.forEach((cell) => {
         state.cellsById[cell.tower_id] = cell;
 
-        // 1. Faint coverage circle showing transmission range
+        // Calculate visual display coordinates (rosette dispersion for co-located sectors)
+        const key = `${cell.latitude.toFixed(5)},${cell.longitude.toFixed(5)}`;
+        const group = mastGroups[key];
+        let displayLat = cell.latitude;
+        let displayLon = cell.longitude;
+
+        if (group.length > 1) {
+            const idx = group.indexOf(cell);
+            let ringRadiusMeters = 24;
+            let ringCount = group.length;
+            let angleIndex = idx;
+
+            if (group.length > 8) {
+                if (idx < 6) {
+                    ringRadiusMeters = 20;
+                    ringCount = 6;
+                    angleIndex = idx;
+                } else if (idx < 22) {
+                    ringRadiusMeters = 42;
+                    ringCount = Math.min(16, group.length - 6);
+                    angleIndex = idx - 6;
+                } else {
+                    ringRadiusMeters = 64;
+                    ringCount = group.length - 22;
+                    angleIndex = idx - 22;
+                }
+            }
+
+            const angle = (2 * Math.PI * angleIndex) / Math.max(1, ringCount);
+            const dLat = (ringRadiusMeters * Math.cos(angle)) / 111139.0;
+            const dLon = (ringRadiusMeters * Math.sin(angle)) / (111139.0 * Math.cos((cell.latitude * Math.PI) / 180));
+            displayLat = cell.latitude + dLat;
+            displayLon = cell.longitude + dLon;
+        }
+
+        cell._displayLat = displayLat;
+        cell._displayLon = displayLon;
+
+        // 1. Subtle coverage circle (faint outline, zero fill to prevent opacity wash)
         const coverageCircle = L.circle([cell.latitude, cell.longitude], {
             radius: cell.range_m,
-            color: "#0284c7",
+            color: "#38bdf8",
             weight: 1,
-            opacity: 0.35,
-            fillColor: "#38bdf8",
-            fillOpacity: 0.05,
+            opacity: 0.22,
+            fill: false,
+            fillOpacity: 0.0,
             dashArray: "3, 4",
         });
         state.coverageCirclesLayer.addLayer(coverageCircle);
+        state.coverageCirclesById[cell.tower_id] = coverageCircle;
 
-        // 2. Crisp, styled center marker for the tower
-        const marker = L.circleMarker([cell.latitude, cell.longitude], {
-            radius: 8,
-            fillColor: "#38bdf8",
-            color: "#ffffff",
-            weight: 2,
-            opacity: 1,
-            fillOpacity: 0.9,
+        // 2. High-legibility custom DivIcon marker
+        const markerIcon = L.divIcon({
+            className: "tower-marker-div",
+            html: `<div class="tower-marker-wrap" id="marker-wrap-${cell.tower_id}">
+                     <div class="tower-marker-circle" id="marker-circle-${cell.tower_id}">•</div>
+                   </div>`,
+            iconSize: [24, 24],
+            iconAnchor: [12, 12],
         });
 
-        // 3. Informative popup card
+        const marker = L.marker([displayLat, displayLon], { icon: markerIcon });
+
+        // Click handler opens contextual vertex inspector
+        marker.on("click", () => {
+            openVertexInspector(cell.tower_id);
+        });
+
+        // Informative popup card
         const popupContent = `
             <div class="tower-popup">
                 <div class="tower-popup-header">
@@ -412,14 +552,14 @@ function renderCellTowers(cells) {
                     <span class="label">Coverage:</span>
                     <span class="val">${Math.round(cell.range_m)} m</span>
                     <span class="label">MCC / MNC:</span>
-                    <span class="val">${cell.mcc ?? "-"} / ${cell.mnc ?? "-"}</span>
+                    <span class="val">${cell.mcc ?? "—"} / ${cell.mnc ?? "—"}</span>
                     <span class="label">LAC:</span>
-                    <span class="val">${cell.lac ?? "-"}</span>
+                    <span class="val">${cell.lac ?? "—"}</span>
                 </div>
             </div>
         `;
-
         marker.bindPopup(popupContent);
+
         state.cellMarkersLayer.addLayer(marker);
         state.markersById[cell.tower_id] = marker;
     });
@@ -429,6 +569,155 @@ function renderCellTowers(cells) {
     if (markerList.length > 0) {
         const group = L.featureGroup(markerList);
         state.map.fitBounds(group.getBounds().pad(0.12));
+    }
+}
+
+/**
+ * Closes the slide-over inspector drawer and restores highlights.
+ */
+function closeVertexInspector() {
+    const inspector = document.getElementById("vertex-inspector");
+    if (inspector) {
+        inspector.classList.remove("open");
+        inspector.setAttribute("aria-hidden", "true");
+    }
+    document.getElementById("analytics-dock")?.classList.remove("with-inspector");
+
+    if (state.selectedTowerId) {
+        const circleEl = document.getElementById(`marker-circle-${state.selectedTowerId}`);
+        if (circleEl) circleEl.classList.remove("selected-marker");
+
+        const covCircle = state.coverageCirclesById?.[state.selectedTowerId];
+        if (covCircle) {
+            covCircle.setStyle({ fill: false, fillOpacity: 0.0, opacity: 0.22, weight: 1 });
+        }
+        state.selectedTowerId = null;
+
+        if (state.activeView === "graph") {
+            renderGraphExplorer();
+        }
+    }
+}
+
+/**
+ * Opens the slide-over inspector drawer for a specific cell tower.
+ */
+function openVertexInspector(towerId) {
+    const inspector = document.getElementById("vertex-inspector");
+    if (!inspector) return;
+
+    const cell = state.cellsById[towerId];
+    if (!cell) return;
+
+    // Remove previous selection styling
+    if (state.selectedTowerId && state.selectedTowerId !== towerId) {
+        const prevCircle = document.getElementById(`marker-circle-${state.selectedTowerId}`);
+        if (prevCircle) prevCircle.classList.remove("selected-marker");
+
+        const prevCov = state.coverageCirclesById?.[state.selectedTowerId];
+        if (prevCov) {
+            prevCov.setStyle({ fill: false, fillOpacity: 0.0, opacity: 0.22, weight: 1 });
+        }
+    }
+
+    state.selectedTowerId = towerId;
+
+    // Highlight current marker on map
+    const currCircle = document.getElementById(`marker-circle-${towerId}`);
+    if (currCircle) currCircle.classList.add("selected-marker");
+
+    // Highlight current coverage circle on map
+    const currCov = state.coverageCirclesById?.[towerId];
+    if (currCov) {
+        currCov.setStyle({ fill: true, fillOpacity: 0.12, opacity: 0.85, weight: 2 });
+    }
+
+    // Header info
+    document.getElementById("inspector-radio").textContent = cell.radio;
+    document.getElementById("inspector-cell-id").textContent = `Cell #${cell.cell_id}`;
+
+    // Assigned frequency badge (1-indexed channels: f1, f2, f3...)
+    const freqBadge = document.getElementById("inspector-freq-badge");
+    const algoKey = state.activeAlgorithm === "welsh_powell" ? "welsh_powell" : "dsatur";
+    const coloring = state.optimizationResults?.[algoKey]?.coloring;
+    if (coloring && coloring[towerId] !== undefined) {
+        const freq = coloring[towerId];
+        const channelNum = freq + 1;
+        const color = FREQUENCY_COLORS[freq % FREQUENCY_COLORS.length];
+        freqBadge.textContent = `Channel f${channelNum} (${algoKey === "welsh_powell" ? "Welsh-Powell" : "DSATUR"})`;
+        freqBadge.style.color = color;
+        freqBadge.style.borderColor = color;
+        freqBadge.style.display = "inline-block";
+    } else {
+        freqBadge.textContent = "Unassigned (Run Optimization)";
+        freqBadge.style.color = "var(--text-muted)";
+        freqBadge.style.borderColor = "var(--border-subtle)";
+    }
+
+    // Geographic fields
+    document.getElementById("insp-coords").textContent = `${cell.latitude.toFixed(5)}°, ${cell.longitude.toFixed(5)}°`;
+    document.getElementById("insp-range").textContent = `${Math.round(cell.range_m)} m`;
+    document.getElementById("insp-mcc-mnc").textContent = `${cell.mcc ?? "—"} / ${cell.mnc ?? "—"}`;
+    document.getElementById("insp-lac").textContent = `${cell.lac ?? "—"}`;
+
+    // Degree and neighbors
+    const neighbors = [];
+    state.interferenceEdges.forEach((edge) => {
+        if (edge.source_id === towerId) {
+            neighbors.push({ id: edge.target_id, dist: edge.distance_m });
+        } else if (edge.target_id === towerId) {
+            neighbors.push({ id: edge.source_id, dist: edge.distance_m });
+        }
+    });
+
+    document.getElementById("insp-degree").textContent = neighbors.length;
+
+    // Check validation / conflict status
+    const inspValidation = document.getElementById("insp-validation");
+    if (coloring) {
+        const myFreq = coloring[towerId];
+        const hasConflict = neighbors.some((n) => coloring[n.id] === myFreq);
+        if (hasConflict) {
+            inspValidation.innerHTML = '<span style="color: var(--accent-rose)">✖ Conflict Detected</span>';
+        } else {
+            inspValidation.innerHTML = '<span style="color: var(--accent-emerald)">✔ Valid (Zero Collisions)</span>';
+        }
+    } else {
+        inspValidation.textContent = "Awaiting optimization";
+    }
+
+    // Render neighbor list
+    const listEl = document.getElementById("insp-neighbor-list");
+    listEl.innerHTML = "";
+    if (neighbors.length === 0) {
+        listEl.innerHTML = '<li class="neighbor-empty">No overlapping interference neighbors (isolated node).</li>';
+    } else {
+        neighbors.forEach((n) => {
+            const nCell = state.cellsById[n.id];
+            const nFreq = coloring ? coloring[n.id] : null;
+            const li = document.createElement("li");
+            li.className = "neighbor-item";
+            li.style.cursor = "pointer";
+            const channelText = nFreq !== null && nFreq !== undefined ? `f${nFreq + 1}` : "—";
+            const channelColor = nFreq !== null && nFreq !== undefined ? FREQUENCY_COLORS[nFreq % FREQUENCY_COLORS.length] : "var(--text-muted)";
+            li.innerHTML = `
+                <span>Cell #${nCell?.cell_id ?? n.id} (${Math.round(n.dist)}m)</span>
+                <span style="color: ${channelColor}; font-weight: 700; font-family: var(--font-mono);">
+                    ${channelText}
+                </span>
+            `;
+            li.addEventListener("click", () => openVertexInspector(n.id));
+            listEl.appendChild(li);
+        });
+    }
+
+    inspector.classList.add("open");
+    inspector.setAttribute("aria-hidden", "false");
+    document.getElementById("analytics-dock")?.classList.add("with-inspector");
+
+    // If graph view is active, re-render to highlight selected node and edges
+    if (state.activeView === "graph") {
+        renderGraphExplorer();
     }
 }
 
@@ -488,16 +777,16 @@ async function runFrequencyOptimization() {
             const isValid = wp.validation?.is_valid ?? wp.is_valid;
             document.getElementById("res-wp-colors").textContent = `${wp.color_count} colors (${wp.runtime_ms.toFixed(2)} ms)`;
             document.getElementById("res-wp-valid").innerHTML = isValid
-                ? '<span style="color: var(--accent-success)">✔ Valid</span>'
-                : '<span style="color: var(--accent-error)">✖ Collision</span>';
+                ? '<span style="color: var(--accent-emerald)">✔ Valid</span>'
+                : '<span style="color: var(--accent-rose)">✖ Collision</span>';
         }
 
         if (ds) {
             const isValid = ds.validation?.is_valid ?? ds.is_valid;
             document.getElementById("res-dsatur-colors").textContent = `${ds.color_count} colors (${ds.runtime_ms.toFixed(2)} ms)`;
             document.getElementById("res-dsatur-valid").innerHTML = isValid
-                ? '<span style="color: var(--accent-success)">✔ Valid</span>'
-                : '<span style="color: var(--accent-error)">✖ Collision</span>';
+                ? '<span style="color: var(--accent-emerald)">✔ Valid</span>'
+                : '<span style="color: var(--accent-rose)">✖ Collision</span>';
         }
 
         // 3. Render interference edge polylines
@@ -506,12 +795,17 @@ async function runFrequencyOptimization() {
         // 4. Color cell markers according to the active algorithm
         applyActiveColoring();
 
+        // 5. If graph view is active, update canvas
+        if (state.activeView === "graph") {
+            renderGraphExplorer();
+        }
+
         statusMsg.textContent = `Optimization complete! DSATUR: ${ds?.color_count} frequencies, Welsh-Powell: ${wp?.color_count} frequencies.`;
-        statusMsg.style.color = "var(--accent-success)";
+        statusMsg.style.color = "var(--accent-emerald)";
     } catch (err) {
         console.error("Optimization failed:", err);
         statusMsg.textContent = `Error: ${err.message}`;
-        statusMsg.style.color = "var(--accent-error)";
+        statusMsg.style.color = "var(--accent-rose)";
     } finally {
         btnOptimize.disabled = false;
         btnOptimize.textContent = "Optimize Frequencies";
@@ -524,13 +818,18 @@ async function runFrequencyOptimization() {
 function renderInterferenceEdges(edges) {
     state.edgesLayer.clearLayers();
 
+    // If more than 500 edges, render with lower opacity to prevent lag
+    const isDense = edges.length > 500;
+    const opacity = isDense ? 0.35 : 0.65;
+    const weight = isDense ? 1 : 2;
+
     edges.forEach((edge) => {
         const line = L.polyline(
             [edge.source_coords, edge.target_coords],
             {
                 color: "#ef4444",
-                weight: 2,
-                opacity: 0.65,
+                weight: weight,
+                opacity: opacity,
                 dashArray: "4, 4",
             }
         );
@@ -561,8 +860,6 @@ function renderInterferenceEdges(edges) {
 function applyActiveColoring() {
     if (!state.optimizationResults) return;
 
-    // Pick algorithm result based on selector:
-    // If 'welsh_powell', use Welsh-Powell; otherwise default to DSATUR
     const algoKey = state.activeAlgorithm === "welsh_powell" ? "welsh_powell" : "dsatur";
     const algoResult = state.optimizationResults[algoKey];
     if (!algoResult || !algoResult.coloring) return;
@@ -570,49 +867,65 @@ function applyActiveColoring() {
     const coloring = algoResult.coloring;
     const maxFreq = algoResult.color_count || 1;
 
-    // 1. Recolour each marker
+    // 1. Recolour each marker on the map with channel badges
     Object.entries(coloring).forEach(([towerId, freq]) => {
-        const marker = state.markersById[towerId];
         const cell = state.cellsById[towerId];
-        if (!marker || !cell) return;
+        if (!cell) return;
 
-        const color = FREQUENCY_COLORS[(freq - 1) % FREQUENCY_COLORS.length];
-        marker.setStyle({
-            fillColor: color,
-            color: "#ffffff",
-            weight: 2,
-            fillOpacity: 0.95,
-        });
+        const channelNum = freq + 1;
+        const color = FREQUENCY_COLORS[freq % FREQUENCY_COLORS.length];
 
-        // Update popup with assigned frequency
-        const algoName = algoKey === "welsh_powell" ? "Welsh-Powell" : "DSATUR";
-        const popupContent = `
-            <div class="tower-popup">
-                <div class="tower-popup-header">
-                    <span class="tower-popup-title">Cell #${cell.cell_id}</span>
-                    <span class="radio-badge">${cell.radio}</span>
+        const circleEl = document.getElementById(`marker-circle-${towerId}`);
+        if (circleEl) {
+            circleEl.style.backgroundColor = color;
+            circleEl.textContent = `f${channelNum}`;
+            circleEl.title = `Cell #${cell.cell_id} (Channel f${channelNum})`;
+        }
+
+        const marker = state.markersById[towerId];
+        if (marker && marker.getPopup()) {
+            const algoName = algoKey === "welsh_powell" ? "Welsh-Powell" : "DSATUR";
+            const popupContent = `
+                <div class="tower-popup">
+                    <div class="tower-popup-header">
+                        <span class="tower-popup-title">Cell #${cell.cell_id}</span>
+                        <span class="radio-badge">${cell.radio}</span>
+                    </div>
+                    <div class="tower-popup-details">
+                        <span class="label">Assigned Freq:</span>
+                        <span class="val" style="color: ${color}; font-weight: 700;">Channel f${channelNum} (${algoName})</span>
+                        <span class="label">Latitude:</span>
+                        <span class="val">${cell.latitude.toFixed(5)}°</span>
+                        <span class="label">Longitude:</span>
+                        <span class="val">${cell.longitude.toFixed(5)}°</span>
+                        <span class="label">Coverage:</span>
+                        <span class="val">${Math.round(cell.range_m)} m</span>
+                        <span class="label">MCC / MNC:</span>
+                        <span class="val">${cell.mcc ?? "—"} / ${cell.mnc ?? "—"}</span>
+                        <span class="label">LAC:</span>
+                        <span class="val">${cell.lac ?? "—"}</span>
+                    </div>
                 </div>
-                <div class="tower-popup-details">
-                    <span class="label">Assigned Freq:</span>
-                    <span class="val" style="color: ${color}; font-weight: 700;">Channel f${freq} (${algoName})</span>
-                    <span class="label">Latitude:</span>
-                    <span class="val">${cell.latitude.toFixed(5)}°</span>
-                    <span class="label">Longitude:</span>
-                    <span class="val">${cell.longitude.toFixed(5)}°</span>
-                    <span class="label">Coverage:</span>
-                    <span class="val">${Math.round(cell.range_m)} m</span>
-                    <span class="label">MCC / MNC:</span>
-                    <span class="val">${cell.mcc ?? "-"} / ${cell.mnc ?? "-"}</span>
-                    <span class="label">LAC:</span>
-                    <span class="val">${cell.lac ?? "-"}</span>
-                </div>
-            </div>
-        `;
-        marker.setPopupContent(popupContent);
+            `;
+            marker.setPopupContent(popupContent);
+        }
     });
 
     // 2. Render color palette legend
     renderLegend(maxFreq, algoKey);
+
+    // 3. Update inspector if open
+    if (state.selectedTowerId && coloring[state.selectedTowerId] !== undefined) {
+        const freq = coloring[state.selectedTowerId];
+        const channelNum = freq + 1;
+        const color = FREQUENCY_COLORS[freq % FREQUENCY_COLORS.length];
+        const freqBadge = document.getElementById("inspector-freq-badge");
+        if (freqBadge) {
+            freqBadge.textContent = `Channel f${channelNum} (${algoKey === "welsh_powell" ? "Welsh-Powell" : "DSATUR"})`;
+            freqBadge.style.color = color;
+            freqBadge.style.borderColor = color;
+        }
+    }
 }
 
 /**
@@ -628,14 +941,65 @@ function renderLegend(maxFreq, algoKey) {
         const color = FREQUENCY_COLORS[(f - 1) % FREQUENCY_COLORS.length];
         const chip = document.createElement("div");
         chip.className = "legend-chip";
+        chip.dataset.channel = f;
         chip.innerHTML = `
             <span class="legend-color-dot" style="background-color: ${color};"></span>
             <span>Freq ${f} (f${f})</span>
         `;
+        chip.addEventListener("click", () => isolateFrequency(f));
         legendItems.appendChild(chip);
     }
 
-    legendContainer.style.display = "block";
+    legendContainer.style.display = "flex";
+}
+
+/**
+ * Interactive frequency channel isolation:
+ * Highlights towers assigned to channel `channelNum` and dims other towers.
+ */
+function isolateFrequency(channelNum) {
+    const algoKey = state.activeAlgorithm === "welsh_powell" ? "welsh_powell" : "dsatur";
+    const coloring = state.optimizationResults?.[algoKey]?.coloring;
+    if (!coloring) return;
+
+    const chips = document.querySelectorAll(".legend-chip");
+    if (state.isolatedFrequency === channelNum) {
+        // Toggle off isolation
+        state.isolatedFrequency = null;
+        chips.forEach((c) => c.classList.remove("active-isolate"));
+
+        Object.keys(coloring).forEach((towerId) => {
+            const circleEl = document.getElementById(`marker-circle-${towerId}`);
+            if (circleEl) {
+                circleEl.classList.remove("dimmed-marker");
+            }
+        });
+    } else {
+        // Isolate specific channel
+        state.isolatedFrequency = channelNum;
+        chips.forEach((c) => {
+            if (Number(c.dataset.channel) === channelNum) {
+                c.classList.add("active-isolate");
+            } else {
+                c.classList.remove("active-isolate");
+            }
+        });
+
+        Object.entries(coloring).forEach(([towerId, freq]) => {
+            const circleEl = document.getElementById(`marker-circle-${towerId}`);
+            if (circleEl) {
+                if (freq + 1 === channelNum) {
+                    circleEl.classList.remove("dimmed-marker");
+                } else {
+                    circleEl.classList.add("dimmed-marker");
+                }
+            }
+        });
+    }
+
+    if (state.activeView === "graph") {
+        renderGraphExplorer();
+    }
 }
 
 /**
@@ -651,14 +1015,230 @@ function resetOptimizationScoreboard() {
     const elDsaturValid = document.getElementById("res-dsatur-valid");
     const legendContainer = document.getElementById("legend-container");
 
-    if (elEdges) elEdges.textContent = "-";
-    if (elDegree) elDegree.textContent = "-";
-    if (elDensity) elDensity.textContent = "-";
-    if (elWpColors) elWpColors.textContent = "-";
-    if (elWpValid) elWpValid.textContent = "-";
-    if (elDsaturColors) elDsaturColors.textContent = "-";
-    if (elDsaturValid) elDsaturValid.textContent = "-";
+    if (elEdges) elEdges.textContent = "—";
+    if (elDegree) elDegree.textContent = "—";
+    if (elDensity) elDensity.textContent = "—";
+    if (elWpColors) elWpColors.textContent = "—";
+    if (elWpValid) elWpValid.textContent = "—";
+    if (elDsaturColors) elDsaturColors.textContent = "—";
+    if (elDsaturValid) elDsaturValid.textContent = "—";
     if (legendContainer) legendContainer.style.display = "none";
+}
+
+/**
+ * Renders the Topology Graph Explorer view on HTML5 Canvas.
+ * Supports Retina HiDPI, interactive selection, and clear channel labels.
+ */
+function renderGraphExplorer() {
+    const canvas = document.getElementById("graph-canvas");
+    if (!canvas) return;
+
+    const ctx = canvas.getContext("2d");
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+
+    const width = rect.width;
+    const height = rect.height;
+
+    ctx.clearRect(0, 0, width, height);
+
+    if (state.cells.length === 0) {
+        ctx.fillStyle = "rgba(148, 163, 184, 0.4)";
+        ctx.font = "14px Inter, sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("No cell records loaded yet. Click 'Fetch Cell Records' on the map to build graph.", width / 2, height / 2);
+        return;
+    }
+
+    const algoKey = state.activeAlgorithm === "welsh_powell" ? "welsh_powell" : "dsatur";
+    const coloring = state.optimizationResults?.[algoKey]?.coloring || {};
+
+    const nodeCoords = {};
+    const total = state.cells.length;
+    const centerX = width / 2;
+    const centerY = height / 2;
+
+    if (total <= 36) {
+        const radius = Math.min(width, height) * 0.38;
+        state.cells.forEach((cell, i) => {
+            const angle = (i * 2 * Math.PI) / total - Math.PI / 2;
+            nodeCoords[cell.tower_id] = {
+                x: centerX + radius * Math.cos(angle),
+                y: centerY + radius * Math.sin(angle),
+                r: 14,
+                cell: cell,
+            };
+        });
+    } else {
+        const innerCount = Math.min(12, Math.floor(total * 0.25));
+        const midCount = Math.min(36, Math.floor(total * 0.45));
+        const outerCount = total - innerCount - midCount;
+
+        const r1 = Math.min(width, height) * 0.16;
+        const r2 = Math.min(width, height) * 0.28;
+        const r3 = Math.min(width, height) * 0.40;
+
+        state.cells.forEach((cell, i) => {
+            let r = r1, ringIdx = i, ringTotal = innerCount;
+            if (i >= innerCount && i < innerCount + midCount) {
+                r = r2;
+                ringIdx = i - innerCount;
+                ringTotal = midCount;
+            } else if (i >= innerCount + midCount) {
+                r = r3;
+                ringIdx = i - innerCount - midCount;
+                ringTotal = outerCount;
+            }
+            const angle = (ringIdx * 2 * Math.PI) / Math.max(1, ringTotal) - Math.PI / 2;
+            nodeCoords[cell.tower_id] = {
+                x: centerX + r * Math.cos(angle),
+                y: centerY + r * Math.sin(angle),
+                r: total > 80 ? 8 : 11,
+                cell: cell,
+            };
+        });
+    }
+
+    state.graphNodePositions = nodeCoords;
+
+    // 1. Draw interference edges
+    const selectedId = state.selectedTowerId;
+    state.interferenceEdges.forEach((edge) => {
+        const p1 = nodeCoords[edge.source_id];
+        const p2 = nodeCoords[edge.target_id];
+        if (!p1 || !p2) return;
+
+        const isIncident = selectedId && (edge.source_id === selectedId || edge.target_id === selectedId);
+
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+
+        if (isIncident) {
+            ctx.lineWidth = 2.5;
+            ctx.strokeStyle = "rgba(245, 158, 11, 0.95)";
+        } else if (selectedId) {
+            ctx.lineWidth = 0.5;
+            ctx.strokeStyle = "rgba(239, 68, 68, 0.08)";
+        } else {
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = "rgba(239, 68, 68, 0.22)";
+        }
+        ctx.stroke();
+    });
+
+    // 2. Draw vertices
+    state.cells.forEach((cell) => {
+        const pos = nodeCoords[cell.tower_id];
+        if (!pos) return;
+
+        const freq = coloring[cell.tower_id];
+        const channelNum = freq !== undefined ? freq + 1 : null;
+        const color = channelNum !== null ? FREQUENCY_COLORS[freq % FREQUENCY_COLORS.length] : "#38bdf8";
+
+        const isSelected = selectedId === cell.tower_id;
+        const isDimmed = state.isolatedFrequency && channelNum !== state.isolatedFrequency;
+
+        ctx.save();
+        if (isDimmed) {
+            ctx.globalAlpha = 0.2;
+        }
+
+        // Selected halo pulse ring
+        if (isSelected) {
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, pos.r + 6, 0, 2 * Math.PI);
+            ctx.fillStyle = "rgba(245, 158, 11, 0.35)";
+            ctx.fill();
+        }
+
+        // Main node circle
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, pos.r, 0, 2 * Math.PI);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.lineWidth = isSelected ? 3 : 1.5;
+        ctx.strokeStyle = isSelected ? "#f59e0b" : "#ffffff";
+        ctx.stroke();
+
+        // Node text label
+        if (pos.r >= 10 && channelNum !== null) {
+            ctx.fillStyle = "#ffffff";
+            ctx.font = `bold ${Math.round(pos.r * 0.75)}px 'JetBrains Mono', monospace`;
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(`f${channelNum}`, pos.x, pos.y);
+        }
+
+        ctx.restore();
+    });
+}
+
+/**
+ * Initializes hover tooltips and click selection on the Graph Topology Canvas.
+ */
+function initGraphCanvasInteractions() {
+    const canvas = document.getElementById("graph-canvas");
+    const tooltip = document.getElementById("graph-tooltip");
+    if (!canvas || !tooltip) return;
+
+    function getNodeAt(x, y) {
+        if (!state.graphNodePositions) return null;
+        for (const [id, pos] of Object.entries(state.graphNodePositions)) {
+            const dx = x - pos.x;
+            const dy = y - pos.y;
+            if (dx * dx + dy * dy <= (pos.r + 5) * (pos.r + 5)) {
+                return pos;
+            }
+        }
+        return null;
+    }
+
+    canvas.addEventListener("mousemove", (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+
+        const node = getNodeAt(mouseX, mouseY);
+        if (node) {
+            canvas.style.cursor = "pointer";
+            const algoKey = state.activeAlgorithm === "welsh_powell" ? "welsh_powell" : "dsatur";
+            const coloring = state.optimizationResults?.[algoKey]?.coloring || {};
+            const freq = coloring[node.cell.tower_id];
+            const channelText = freq !== undefined ? `Channel f${freq + 1}` : "Unassigned";
+
+            tooltip.style.display = "flex";
+            tooltip.style.left = `${mouseX + 15}px`;
+            tooltip.style.top = `${mouseY + 15}px`;
+            tooltip.innerHTML = `
+                <div style="font-weight: 700; color: var(--text-primary)">Cell #${node.cell.cell_id} <span style="font-size: 0.65rem; color: var(--accent-blue)">${node.cell.radio}</span></div>
+                <div style="font-size: 0.68rem; color: var(--accent-emerald)">${channelText}</div>
+                <div style="font-size: 0.64rem; color: var(--text-muted)">Range: ${Math.round(node.cell.range_m)}m</div>
+            `;
+        } else {
+            canvas.style.cursor = "default";
+            tooltip.style.display = "none";
+        }
+    });
+
+    canvas.addEventListener("mouseleave", () => {
+        tooltip.style.display = "none";
+    });
+
+    canvas.addEventListener("click", (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+
+        const node = getNodeAt(mouseX, mouseY);
+        if (node) {
+            openVertexInspector(node.cell.tower_id);
+        }
+    });
 }
 
 /**
