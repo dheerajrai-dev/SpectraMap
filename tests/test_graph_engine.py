@@ -6,6 +6,7 @@ from graph_engine import (
     validate_coloring,
     color_welsh_powell,
     color_dsatur,
+    color_exact_dsatur_bnb,
     optimize_graph_frequencies,
 )
 
@@ -227,6 +228,283 @@ def test_optimize_graph_frequencies():
     assert opt["welsh_powell"]["validation"]["is_valid"] is True
     assert opt["dsatur"]["color_count"] == 3
     assert opt["welsh_powell"]["color_count"] == 3
+    assert "exact" in opt
+    assert opt["exact"] is not None
+    assert opt["exact"]["validation"]["is_valid"] is True
+    assert opt["exact"]["color_count"] == 3
+    assert opt["exact"]["status"] == "exact_optimal"
+    assert opt["exact"]["proven_optimal"] is True
     assert opt["optimization_runtime_ms"] >= 0
+
+
+def test_optimize_graph_frequencies_run_exact_false():
+    import networkx as nx
+    G = nx.cycle_graph(5)
+    opt = optimize_graph_frequencies(G, run_exact=False)
+    assert opt["exact"] is None
+    assert opt["best_algorithm"] in ["DSatur", "Welsh-Powell"]
+
+
+def test_exact_solver_empty_graph():
+    import networkx as nx
+    G = nx.Graph()
+    res = color_exact_dsatur_bnb(G)
+    assert res["algorithm"] == "exact_dsatur_bnb"
+    assert res["color_count"] == 0
+    assert res["coloring"] == {}
+    assert res["status"] == "exact_optimal"
+    assert res["proven_optimal"] is True
+    assert res["lower_bound"] == 0
+    assert res["upper_bound"] == 0
+    assert res["validation"]["is_valid"] is True
+
+
+def test_exact_solver_isolated_nodes():
+    import networkx as nx
+    G = nx.Graph()
+    G.add_nodes_from(["n1", "n2", "n3", "n4", "n5"])
+    res = color_exact_dsatur_bnb(G)
+    assert res["status"] == "exact_optimal"
+    assert res["proven_optimal"] is True
+    assert res["color_count"] == 1
+    assert res["validation"]["is_valid"] is True
+    assert all(c == 0 for c in res["coloring"].values())
+
+
+def test_exact_solver_complete_graphs():
+    import networkx as nx
+    for n in [3, 4, 5]:
+        G = nx.complete_graph(n)
+        res = color_exact_dsatur_bnb(G)
+        assert res["status"] == "exact_optimal"
+        assert res["proven_optimal"] is True
+        assert res["color_count"] == n
+        assert res["validation"]["is_valid"] is True
+
+
+def test_exact_solver_odd_cycles():
+    import networkx as nx
+    for n in [5, 7]:
+        G = nx.cycle_graph(n)
+        res = color_exact_dsatur_bnb(G)
+        assert res["status"] == "exact_optimal"
+        assert res["proven_optimal"] is True
+        assert res["color_count"] == 3
+        assert res["validation"]["is_valid"] is True
+
+
+def test_exact_solver_even_cycles():
+    import networkx as nx
+    for n in [4, 6]:
+        G = nx.cycle_graph(n)
+        res = color_exact_dsatur_bnb(G)
+        assert res["status"] == "exact_optimal"
+        assert res["proven_optimal"] is True
+        assert res["color_count"] == 2
+        assert res["validation"]["is_valid"] is True
+
+
+def test_exact_solver_bipartite_graph():
+    import networkx as nx
+    G = nx.complete_bipartite_graph(3, 3)
+    res = color_exact_dsatur_bnb(G)
+    assert res["status"] == "exact_optimal"
+    assert res["proven_optimal"] is True
+    assert res["color_count"] == 2
+    assert res["validation"]["is_valid"] is True
+
+
+def test_exact_solver_groetzsch_graph():
+    # Mycielski graph of C5 has N=11, omega=2, chi=4
+    import networkx as nx
+    G = nx.mycielski_graph(4)
+    assert G.number_of_nodes() == 11
+    res = color_exact_dsatur_bnb(G)
+    assert res["status"] == "exact_optimal"
+    assert res["proven_optimal"] is True
+    assert res["color_count"] == 4
+    assert res["validation"]["is_valid"] is True
+
+
+def test_exact_solver_petersen_graph():
+    import networkx as nx
+    G = nx.petersen_graph()
+    res = color_exact_dsatur_bnb(G)
+    assert res["status"] == "exact_optimal"
+    assert res["proven_optimal"] is True
+    assert res["color_count"] == 3
+    assert res["validation"]["is_valid"] is True
+
+
+def test_exact_solver_tree_star():
+    import networkx as nx
+    G = nx.star_graph(15)
+    res = color_exact_dsatur_bnb(G)
+    assert res["status"] == "exact_optimal"
+    assert res["proven_optimal"] is True
+    assert res["color_count"] == 2
+    assert res["validation"]["is_valid"] is True
+
+
+def test_exact_solver_wheel_graphs():
+    import networkx as nx
+    # W5 = wheel with 5 nodes (hub + C4) -> chi=3
+    # W6 = wheel with 6 nodes (hub + C5) -> chi=4
+    W5 = nx.wheel_graph(5)
+    res5 = color_exact_dsatur_bnb(W5)
+    assert res5["color_count"] == 3
+    assert res5["proven_optimal"] is True
+
+    W6 = nx.wheel_graph(6)
+    res6 = color_exact_dsatur_bnb(W6)
+    assert res6["color_count"] == 4
+    assert res6["proven_optimal"] is True
+
+
+def test_exact_solver_beats_heuristics_er_seed_3():
+    # Discrepancy proof case: G(18, 0.4, seed=3)
+    # Welsh-Powell and DSatur both consume 5 colors, exact solver proves chi(G) = 4
+    import networkx as nx
+    G = nx.erdos_renyi_graph(18, 0.4, seed=3)
+
+    wp = color_welsh_powell(G)
+    ds = color_dsatur(G)
+    exact = color_exact_dsatur_bnb(G)
+
+    assert wp["color_count"] == 5
+    assert ds["color_count"] == 5
+    assert exact["color_count"] == 4
+    assert exact["proven_optimal"] is True
+    assert exact["status"] == "exact_optimal"
+    assert exact["validation"]["is_valid"] is True
+
+    # When integrated into optimize_graph_frequencies, exact solver is selected as best
+    opt = optimize_graph_frequencies(G)
+    assert opt["best_algorithm"] == "exact_dsatur_bnb"
+    assert opt["exact"]["color_count"] == 4
+
+
+def test_exact_solver_size_limit_skipped():
+    import networkx as nx
+    # N=26 exceeds limit of 25
+    G26 = nx.path_graph(26)
+    res26 = color_exact_dsatur_bnb(G26, max_nodes=25)
+    assert res26["status"] == "skipped_size_limit"
+    assert res26["proven_optimal"] is False
+    assert res26["validation"]["is_valid"] is True
+    assert res26["color_count"] == color_dsatur(G26)["color_count"]
+
+    # Boundary N=25 within limit
+    G25 = nx.path_graph(25)
+    res25 = color_exact_dsatur_bnb(G25, max_nodes=25)
+    assert res25["status"] == "exact_optimal"
+    assert res25["proven_optimal"] is True
+    assert res25["color_count"] == 2
+
+
+def test_exact_solver_timeout_handling():
+    import networkx as nx
+    # Graph requiring branching with microscopic timeout of 0.0001s halts within deadline
+    G = nx.erdos_renyi_graph(25, 0.35, seed=2)
+    res = color_exact_dsatur_bnb(G, timeout_sec=0.0001)
+    assert res["status"] == "timeout"
+    assert res["proven_optimal"] is False
+    assert res["validation"]["is_valid"] is True
+    assert res["color_count"] >= 1
+
+
+def test_solvers_graph_invariance():
+    import networkx as nx
+    import copy
+    G = nx.Graph()
+    G.add_node("T1", latitude=28.61, longitude=77.20, range_m=500.0)
+    G.add_node("T2", latitude=28.62, longitude=77.20, range_m=500.0)
+    G.add_node("T3", latitude=28.63, longitude=77.20, range_m=500.0)
+    G.add_edge("T1", "T2", distance_m=300.0, threshold_m=1000.0)
+    G.add_edge("T2", "T3", distance_m=300.0, threshold_m=1000.0)
+
+    nodes_before = copy.deepcopy(list(G.nodes(data=True)))
+    edges_before = copy.deepcopy(list(G.edges(data=True)))
+
+    color_welsh_powell(G)
+    assert list(G.nodes(data=True)) == nodes_before
+    assert list(G.edges(data=True)) == edges_before
+
+    color_dsatur(G)
+    assert list(G.nodes(data=True)) == nodes_before
+    assert list(G.edges(data=True)) == edges_before
+
+    color_exact_dsatur_bnb(G)
+    assert list(G.nodes(data=True)) == nodes_before
+    assert list(G.edges(data=True)) == edges_before
+
+    optimize_graph_frequencies(G)
+    assert list(G.nodes(data=True)) == nodes_before
+    assert list(G.edges(data=True)) == edges_before
+
+
+def test_exact_solver_determinism():
+    import networkx as nx
+    G = nx.erdos_renyi_graph(15, 0.35, seed=99)
+    first_run = color_exact_dsatur_bnb(G)
+    for _ in range(10):
+        subsequent_run = color_exact_dsatur_bnb(G)
+        assert first_run["coloring"] == subsequent_run["coloring"]
+        assert first_run["color_count"] == subsequent_run["color_count"]
+        assert first_run["status"] == subsequent_run["status"]
+
+
+def test_validator_invalid_color_types_and_values():
+    import networkx as nx
+    G = nx.path_graph(3)
+
+    # Negative color
+    bad1 = {0: -1, 1: 0, 2: 1}
+    assert validate_coloring(G, bad1)["is_valid"] is False
+
+    # Boolean as color (bool is subclass of int in Python)
+    bad2 = {0: True, 1: 0, 2: 1}
+    assert validate_coloring(G, bad2)["is_valid"] is False
+
+    # String as color
+    bad3 = {0: "color0", 1: 0, 2: 1}
+    assert validate_coloring(G, bad3)["is_valid"] is False
+
+
+def test_validator_disjoint_components():
+    import networkx as nx
+    # Two disconnected triangles: K3 + K3
+    G = nx.disjoint_union(nx.complete_graph(3), nx.complete_graph(3))
+    res = color_exact_dsatur_bnb(G)
+    assert res["status"] == "exact_optimal"
+    assert res["proven_optimal"] is True
+    assert res["color_count"] == 3
+    assert res["validation"]["is_valid"] is True
+
+
+def test_cellular_spatial_topologies():
+    # 1. Complete overlap cluster: 3 towers at exact same coordinates with 500m range -> K3
+    cells_overlap = [
+        {"tower_id": "C1", "latitude": 28.6000, "longitude": 77.2000, "range_m": 500.0},
+        {"tower_id": "C2", "latitude": 28.6000, "longitude": 77.2000, "range_m": 500.0},
+        {"tower_id": "C3", "latitude": 28.6000, "longitude": 77.2000, "range_m": 500.0},
+    ]
+    g_overlap = build_interference_graph(cells_overlap)
+    assert g_overlap.number_of_nodes() == 3
+    assert g_overlap.number_of_edges() == 3
+    exact_overlap = color_exact_dsatur_bnb(g_overlap)
+    assert exact_overlap["color_count"] == 3
+
+    # 2. Disjoint array: 3 towers 5km apart with 200m range -> 0 edges
+    cells_disjoint = [
+        {"tower_id": "D1", "latitude": 28.6000, "longitude": 77.2000, "range_m": 200.0},
+        {"tower_id": "D2", "latitude": 28.6500, "longitude": 77.2000, "range_m": 200.0},
+        {"tower_id": "D3", "latitude": 28.7000, "longitude": 77.2000, "range_m": 200.0},
+    ]
+    g_disjoint = build_interference_graph(cells_disjoint)
+    assert g_disjoint.number_of_nodes() == 3
+    assert g_disjoint.number_of_edges() == 0
+    exact_disjoint = color_exact_dsatur_bnb(g_disjoint)
+    assert exact_disjoint["color_count"] == 1
 
 

@@ -14,6 +14,22 @@ EARTH_RADIUS_METRES = 6_371_000.0
 OPENCELLID_AREA_URL = "https://opencellid.org/cell/getInArea"
 ATTRIBUTION_TEXT = "Cell tower data from OpenCellID, licensed under CC BY-SA 4.0."
 
+# 4-tier coverage radii fallback hierarchy (survey_math_spec §3, decision.md Decision 6)
+RADIO_FALLBACK_RADII: dict[str, float] = {
+    "GSM": 1000.0,
+    "2G": 1000.0,
+    "CDMA": 1000.0,
+    "UMTS": 800.0,
+    "3G": 800.0,
+    "LTE": 800.0,
+    "4G": 800.0,
+    "NR": 500.0,
+    "5G": 500.0,
+}
+DEFAULT_FALLBACK_RADIUS: float = 800.0
+MIN_VALID_RANGE_M: float = 50.0
+MAX_VALID_RANGE_M: float = 10_000.0
+
 
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """
@@ -50,13 +66,20 @@ def calculate_bounding_box(
     delta_lat = radius_m / 111_139.0
     lat_rad = math.radians(center_lat)
     cos_lat = math.cos(lat_rad)
-    delta_lon = radius_m / (111_139.0 * cos_lat) if abs(cos_lat) > 1e-6 else radius_m / 111_139.0
+
+    # Polar singularity protection: when approaching poles (|lat| >= 89.9 deg or |cos_lat| <= 1e-6),
+    # meridian convergence causes longitude span to cover the entire globe [-180.0, 180.0].
+    if abs(cos_lat) > 1e-6 and abs(center_lat) < 89.9:
+        delta_lon = radius_m / (111_139.0 * cos_lat)
+        lonmin = max(-180.0, center_lon - delta_lon)
+        lonmax = min(180.0, center_lon + delta_lon)
+    else:
+        lonmin = -180.0
+        lonmax = 180.0
 
     # Build the rectangular boundary box
     latmin = max(-90.0, center_lat - delta_lat)
     latmax = min(90.0, center_lat + delta_lat)
-    lonmin = max(-180.0, center_lon - delta_lon)
-    lonmax = min(180.0, center_lon + delta_lon)
 
     return latmin, lonmin, latmax, lonmax
 
@@ -115,33 +138,37 @@ def filter_records_by_radius(
 
 def validate_cell_record(raw: dict[str, Any]) -> bool:
     """
-    Validate that a raw OpenCellID cell record contains necessary, valid data.
+    Validate that a raw OpenCellID cell record contains valid geographic coordinates and identifier.
 
-    Explicit policy:
-    - Must have numeric 'lat' in [-90, 90].
-    - Must have numeric 'lon' in [-180, 180].
-    - Must have positive numeric 'range' (in metres). Records with missing, zero,
-      or negative range are rejected to prevent invented propagation models.
-    - Must have a valid 'cellid'.
+    Explicit policy (Phase 1 / survey_math_spec §3):
+    - Must be a dictionary.
+    - Must have numeric 'lat' in [-90.0, 90.0].
+    - Must have numeric 'lon' in [-180.0, 180.0].
+    - Must have a valid 'cellid' (not None, convertible to int).
+    - Missing, zero, negative, or non-numeric 'range' is ALLOWED here so that
+      normalize_cell_record can apply the deterministic 4-tier fallback hierarchy
+      rather than dropping physically valid transmitter locations.
     """
     if not isinstance(raw, dict):
         return False
 
     try:
-        lat = float(raw["lat"])
-        lon = float(raw["lon"])
-        rng = float(raw["range"])
         cell_id = raw.get("cellid")
-
         if cell_id is None:
             return False
+        # Ensure cellid can be converted to int
+        int(cell_id)
 
-        # Reject out-of-bounds GPS coordinates or non-positive radio ranges
+        lat = float(raw["lat"])
+        lon = float(raw["lon"])
+
+        if math.isnan(lat) or math.isnan(lon) or math.isinf(lat) or math.isinf(lon):
+            return False
+
+        # Reject out-of-bounds GPS coordinates
         if not (-90.0 <= lat <= 90.0):
             return False
         if not (-180.0 <= lon <= 180.0):
-            return False
-        if rng <= 0:
             return False
 
         return True
@@ -152,12 +179,14 @@ def validate_cell_record(raw: dict[str, Any]) -> bool:
 
 def normalize_cell_record(raw: dict[str, Any], retrieved_at: str | None = None) -> dict[str, Any]:
     """
-    Transform a raw OpenCellID record into SpectraMap's standard internal schema.
+    Transform a raw OpenCellID record into SpectraMap's standard internal schema,
+    applying the 4-tier coverage radii fallback hierarchy when necessary.
     """
     if not validate_cell_record(raw):
         raise ValueError(f"Cannot normalize invalid cell record: {raw}")
 
-    radio = str(raw.get("radio", "UNKNOWN")).upper()
+    raw_radio = str(raw.get("radio") or "UNKNOWN").strip().upper()
+    radio = raw_radio if raw_radio else "UNKNOWN"
     mcc = int(raw["mcc"]) if raw.get("mcc") is not None else None
     mnc = int(raw["mnc"]) if raw.get("mnc") is not None else None
     area = int(raw.get("lac") or raw.get("tac") or 0)
@@ -167,11 +196,65 @@ def normalize_cell_record(raw: dict[str, Any], retrieved_at: str | None = None) 
     tower_id = f"{radio}_{mcc}_{mnc}_{area}_{cell_id}"
     timestamp = retrieved_at or datetime.now(timezone.utc).isoformat()
 
+    # Determine range and apply 4-tier fallback hierarchy
+    raw_range = raw.get("range")
+    cell_warnings: list[str] = []
+
+    parsed_range: float | None = None
+    reason: str | None = None
+
+    if "range" not in raw:
+        reason = "missing"
+    elif raw_range is None:
+        reason = "null"
+    else:
+        try:
+            val = float(raw_range)
+            if math.isnan(val) or math.isinf(val):
+                reason = "non_numeric"
+            elif val == 0:
+                reason = "zero"
+            elif val < 0:
+                reason = "negative"
+            else:
+                parsed_range = val
+        except (ValueError, TypeError):
+            reason = "non_numeric"
+
+    if parsed_range is not None:
+        if parsed_range > MAX_VALID_RANGE_M:
+            range_m = MAX_VALID_RANGE_M
+            is_range_estimated = True
+            range_source = "fallback_clamped"
+            fallback_reason = "outlier"
+            msg = f"Cell {tower_id} ({radio}) had outlier range ({raw_range}m); clamped to {range_m}m."
+            cell_warnings.append(msg)
+        elif parsed_range < MIN_VALID_RANGE_M:
+            range_m = MIN_VALID_RANGE_M
+            is_range_estimated = True
+            range_source = "fallback_clamped"
+            fallback_reason = "outlier"
+            msg = f"Cell {tower_id} ({radio}) had outlier range ({raw_range}m); clamped to {range_m}m."
+            cell_warnings.append(msg)
+        else:
+            range_m = float(parsed_range)
+            is_range_estimated = False
+            range_source = "reported"
+            fallback_reason = None
+    else:
+        fallback_radius = RADIO_FALLBACK_RADII.get(radio, DEFAULT_FALLBACK_RADIUS)
+        range_m = float(fallback_radius)
+        is_range_estimated = True
+        range_source = "fallback_default"
+        fallback_reason = reason or "missing"
+        msg = f"Cell {tower_id} ({radio}) lacked valid reported range ({raw_range}); applied default estimate of {range_m}m."
+        cell_warnings.append(msg)
+
     return {
         "tower_id": tower_id,
         "latitude": float(raw["lat"]),
         "longitude": float(raw["lon"]),
-        "range_m": float(raw["range"]),
+        "range_m": range_m,
         "radio": radio,
         "mcc": mcc,
         "mnc": mnc,
@@ -179,13 +262,20 @@ def normalize_cell_record(raw: dict[str, Any], retrieved_at: str | None = None) 
         "cell_id": cell_id,
         "source": "OpenCellID",
         "retrieved_at": timestamp,
+        "is_range_estimated": is_range_estimated,
+        "range_is_fallback": is_range_estimated,
+        "range_source": range_source,
+        "fallback_reason": fallback_reason,
+        "raw_range": raw_range,
+        "warnings": cell_warnings,
     }
 
 
 def parse_opencellid_response(payload: Any) -> tuple[list[dict[str, Any]], list[str]]:
     """
     Parse an OpenCellID response payload, returning (normalized_records, warnings).
-    Handles empty responses, error messages, and skips malformed records.
+    Handles empty responses, error messages, and skips malformed records while
+    applying coverage fallback with informative warnings for unestimated cells.
     """
     warnings: list[str] = []
     records: list[dict[str, Any]] = []
@@ -206,7 +296,10 @@ def parse_opencellid_response(payload: Any) -> tuple[list[dict[str, Any]], list[
     # Normalize valid cells; log warnings for malformed or rejected records
     for raw in raw_cells:
         if validate_cell_record(raw):
-            records.append(normalize_cell_record(raw, retrieved_at=retrieved_at))
+            norm = normalize_cell_record(raw, retrieved_at=retrieved_at)
+            records.append(norm)
+            if norm.get("warnings"):
+                warnings.extend(norm["warnings"])
         else:
             warnings.append(f"Rejected invalid cell record: cellid={raw.get('cellid')}")
 

@@ -78,27 +78,31 @@ def get_interference_edges(graph: nx.Graph) -> list[dict[str, Any]]:
     return edges
 
 
-def validate_coloring(graph: nx.Graph, coloring: dict[str, int]) -> dict[str, Any]:
+def validate_coloring(graph: nx.Graph, coloring: dict[Any, int]) -> dict[str, Any]:
     """
     Independently verify that a graph coloring has zero conflicts and no missing assignments.
     """
-    conflicts: list[tuple[str, str]] = []
-    missing_nodes: list[str] = []
+    conflicts: list[tuple[Any, Any]] = []
+    missing_nodes: list[Any] = []
 
-    # 1. Assert all graph vertices have an assigned color
+    # 1. Assert all graph vertices have an assigned non-negative integer color
     for node in graph.nodes():
-        if node not in coloring or coloring[node] is None:
+        if not coloring or node not in coloring:
             missing_nodes.append(node)
+        else:
+            val = coloring[node]
+            if val is None or not isinstance(val, int) or isinstance(val, bool) or val < 0:
+                missing_nodes.append(node)
 
     # 2. Iterate through every edge and assert adjacent vertices have distinct colors
     for u, v in graph.edges():
-        color_u = coloring.get(u)
-        color_v = coloring.get(v)
+        color_u = coloring.get(u) if coloring else None
+        color_v = coloring.get(v) if coloring else None
         if color_u is not None and color_v is not None and color_u == color_v:
             conflicts.append((u, v))
 
     is_valid = len(conflicts) == 0 and len(missing_nodes) == 0
-    unique_colors = len(set(coloring.values())) if coloring else 0
+    unique_colors = len({c for c in coloring.values() if isinstance(c, int) and not isinstance(c, bool) and c >= 0}) if coloring else 0
 
     return {
         "is_valid": is_valid,
@@ -237,31 +241,223 @@ def color_dsatur(graph: nx.Graph) -> dict[str, Any]:
     }
 
 
-def optimize_graph_frequencies(graph: nx.Graph) -> dict[str, Any]:
+def color_exact_dsatur_bnb(
+    graph: nx.Graph,
+    max_nodes: int = 25,
+    timeout_sec: float = 0.5,
+) -> dict[str, Any]:
     """
-    Run both DSatur and Welsh–Powell on the same graph, validate both,
-    and choose the best valid result (fewer colors; tie-break: DSatur).
+    Find the exact chromatic number chi(G) and an optimal vertex coloring using
+    a DSatur-guided Branch-and-Bound algorithm with maximum clique symmetry breaking.
+
+    Strictly bounded to max_nodes (default 25) and timeout_sec (default 0.5s).
+    Returns a result dictionary with status:
+      - 'exact_optimal': proved chi(G) within limits.
+      - 'skipped_size_limit': graph size > max_nodes, returns heuristic fallback.
+      - 'timeout': search exceeded timeout_sec, returns best valid coloring found.
+    """
+    start_time = time.perf_counter()
+    num_nodes = graph.number_of_nodes()
+
+    # 1. Size bounds check
+    if num_nodes > max_nodes:
+        dsatur_fallback = color_dsatur(graph)
+        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        return {
+            "algorithm": "exact_dsatur_bnb",
+            "coloring": dsatur_fallback["coloring"],
+            "color_count": dsatur_fallback["color_count"],
+            "runtime_ms": elapsed_ms,
+            "status": "skipped_size_limit",
+            "proven_optimal": False,
+            "lower_bound": None,
+            "upper_bound": dsatur_fallback["color_count"],
+            "message": f"Graph size ({num_nodes} nodes) exceeds exact solver limit (max {max_nodes} nodes). Returned best heuristic coloring.",
+            "validation": dsatur_fallback["validation"],
+        }
+
+    # 2. Empty graph base case
+    if num_nodes == 0:
+        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        return {
+            "algorithm": "exact_dsatur_bnb",
+            "coloring": {},
+            "color_count": 0,
+            "runtime_ms": elapsed_ms,
+            "status": "exact_optimal",
+            "proven_optimal": True,
+            "lower_bound": 0,
+            "upper_bound": 0,
+            "message": "Empty graph has chromatic number 0.",
+            "validation": validate_coloring(graph, {}),
+        }
+
+    # 3. Initial Upper Bound (UB) from DSatur heuristic
+    dsatur_init = color_dsatur(graph)
+    ub = dsatur_init["color_count"]
+    best_coloring = dict(dsatur_init["coloring"])
+
+    # 4. Initial Lower Bound (LB) from Maximum Clique
+    clique_nodes, lb = nx.algorithms.clique.max_weight_clique(graph, weight=None)
+
+    # If UB == LB, heuristic is proven optimal immediately (no branching needed)
+    if ub == lb:
+        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        return {
+            "algorithm": "exact_dsatur_bnb",
+            "coloring": best_coloring,
+            "color_count": ub,
+            "runtime_ms": elapsed_ms,
+            "status": "exact_optimal",
+            "proven_optimal": True,
+            "lower_bound": lb,
+            "upper_bound": ub,
+            "message": "Proven optimal chromatic number computed via DSatur branch-and-bound.",
+            "validation": dsatur_init["validation"],
+        }
+
+    # 5. Root Pre-Coloring on Maximum Clique for symmetry breaking
+    # Sort clique deterministically by descending degree, then str(node)
+    sorted_clique = sorted(clique_nodes, key=lambda n: (-graph.degree(n), str(n)))
+    root_coloring: dict[Any, int] = {node: idx for idx, node in enumerate(sorted_clique)}
+    max_color_used = lb - 1
+
+    # 6. Branch and Bound with dynamic DSatur vertex selection & deadline check
+    deadline = start_time + timeout_sec
+    if time.perf_counter() > deadline:
+        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        return {
+            "algorithm": "exact_dsatur_bnb",
+            "coloring": best_coloring,
+            "color_count": ub,
+            "runtime_ms": elapsed_ms,
+            "status": "timeout",
+            "proven_optimal": False,
+            "lower_bound": lb,
+            "upper_bound": ub,
+            "message": f"Exact solver exceeded timeout ({timeout_sec * 1000:.0f}ms). Returned best valid coloring found.",
+            "validation": dsatur_init["validation"],
+        }
+
+    timed_out = False
+
+    def branch(current_coloring: dict[Any, int], current_max_c: int) -> None:
+        nonlocal ub, best_coloring, timed_out
+
+        # Monotonic clock check at every branch expansion
+        if time.perf_counter() > deadline:
+            timed_out = True
+            return
+
+        uncolored = [n for n in graph.nodes() if n not in current_coloring]
+        if not uncolored:
+            # Complete valid coloring found
+            k = current_max_c + 1
+            if k < ub:
+                ub = k
+                best_coloring = dict(current_coloring)
+            return
+
+        # Dynamic DSatur selection: maximum saturation degree, tie-broken by degree & str(node)
+        def priority(node: Any) -> tuple[int, int, str]:
+            nbr_colors = {
+                current_coloring[nbr]
+                for nbr in graph.neighbors(node)
+                if nbr in current_coloring
+            }
+            return (-len(nbr_colors), -graph.degree(node), str(node))
+
+        chosen_node = min(uncolored, key=priority)
+        forbidden_colors = {
+            current_coloring[nbr]
+            for nbr in graph.neighbors(chosen_node)
+            if nbr in current_coloring
+        }
+
+        # Try existing valid colors in {0, ..., current_max_c}
+        for c in range(current_max_c + 1):
+            if c not in forbidden_colors:
+                current_coloring[chosen_node] = c
+                branch(current_coloring, current_max_c)
+                del current_coloring[chosen_node]
+                if ub == lb or timed_out:
+                    return
+
+        # Try at most ONE new color, provided new_c + 1 < ub
+        new_c = current_max_c + 1
+        if new_c + 1 < ub:
+            current_coloring[chosen_node] = new_c
+            branch(current_coloring, new_c)
+            del current_coloring[chosen_node]
+            if ub == lb or timed_out:
+                return
+
+    branch(root_coloring, max_color_used)
+
+    elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+    validation = validate_coloring(graph, best_coloring)
+
+    if timed_out:
+        status = "timeout"
+        proven_optimal = False
+        message = f"Exact solver exceeded timeout ({timeout_sec * 1000:.0f}ms). Returned best valid coloring found."
+    else:
+        status = "exact_optimal"
+        proven_optimal = True
+        message = "Proven optimal chromatic number computed via DSatur branch-and-bound."
+
+    return {
+        "algorithm": "exact_dsatur_bnb",
+        "coloring": best_coloring,
+        "color_count": ub,
+        "runtime_ms": elapsed_ms,
+        "status": status,
+        "proven_optimal": proven_optimal,
+        "lower_bound": lb,
+        "upper_bound": ub,
+        "message": message,
+        "validation": validation,
+    }
+
+
+def optimize_graph_frequencies(
+    graph: nx.Graph,
+    run_exact: bool = True,
+) -> dict[str, Any]:
+    """
+    Run DSatur, Welsh–Powell, and bounded Exact DSatur Branch-and-Bound on the same graph.
+    Validate all colorings and select the best valid algorithm (minimum colors; tie-break: DSatur).
     """
     start_time = time.perf_counter()
 
     dsatur_result = color_dsatur(graph)
     wp_result = color_welsh_powell(graph)
 
-    # Determine default algorithm: fewer colors wins; if tied, default to DSatur
-    ds_valid = dsatur_result["validation"]["is_valid"]
-    wp_valid = wp_result["validation"]["is_valid"]
+    exact_result = None
+    if run_exact:
+        exact_result = color_exact_dsatur_bnb(graph)
 
-    if ds_valid and wp_valid:
-        if dsatur_result["color_count"] <= wp_result["color_count"]:
-            best_algorithm = "DSatur"
-        else:
-            best_algorithm = "Welsh-Powell"
-    elif ds_valid:
-        best_algorithm = "DSatur"
-    elif wp_valid:
-        best_algorithm = "Welsh-Powell"
+    # Determine best algorithm among valid solutions
+    candidates: list[tuple[str, int]] = []
+    if dsatur_result["validation"]["is_valid"]:
+        candidates.append(("DSatur", dsatur_result["color_count"]))
+    if wp_result["validation"]["is_valid"]:
+        candidates.append(("Welsh-Powell", wp_result["color_count"]))
+    if exact_result and exact_result["validation"]["is_valid"]:
+        candidates.append((exact_result["algorithm"], exact_result["color_count"]))
+
+    if not candidates:
+        best_algorithm = "None (all invalid)"
     else:
-        best_algorithm = "None (both invalid)"
+        min_colors = min(c[1] for c in candidates)
+        min_candidates = [name for name, c in candidates if c == min_colors]
+        # Prefer DSatur on ties, then Welsh-Powell, then exact
+        if "DSatur" in min_candidates:
+            best_algorithm = "DSatur"
+        elif "Welsh-Powell" in min_candidates:
+            best_algorithm = "Welsh-Powell"
+        else:
+            best_algorithm = min_candidates[0]
 
     total_runtime_ms = round((time.perf_counter() - start_time) * 1000, 3)
     metrics = get_graph_metrics(graph)
@@ -271,6 +467,7 @@ def optimize_graph_frequencies(graph: nx.Graph) -> dict[str, Any]:
         "best_algorithm": best_algorithm,
         "dsatur": dsatur_result,
         "welsh_powell": wp_result,
+        "exact": exact_result,
         "optimization_runtime_ms": total_runtime_ms,
     }
 

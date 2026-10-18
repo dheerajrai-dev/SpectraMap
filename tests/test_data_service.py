@@ -1,3 +1,4 @@
+import math
 import httpx
 import pytest
 from data_service import (
@@ -37,18 +38,48 @@ def test_validate_valid_record(valid_raw_cell):
     [
         {"lat": 95.0},
         {"lat": -91.0},
+        {"lat": "not_a_number"},
         {"lon": 181.0},
         {"lon": -185.0},
-        {"range": 0},
-        {"range": -100},
-        {"range": "not_a_number"},
+        {"lon": "not_a_number"},
         {"cellid": None},
+        {"cellid": "not_an_int"},
     ],
 )
 def test_validate_invalid_records(valid_raw_cell, invalid_update):
     record = valid_raw_cell.copy()
     record.update(invalid_update)
     assert validate_cell_record(record) is False
+
+
+def test_validate_missing_lat_or_lon(valid_raw_cell):
+    r1 = valid_raw_cell.copy()
+    del r1["lat"]
+    assert validate_cell_record(r1) is False
+
+    r2 = valid_raw_cell.copy()
+    del r2["lon"]
+    assert validate_cell_record(r2) is False
+
+
+@pytest.mark.parametrize(
+    "range_update",
+    [
+        {"range": 0},
+        {"range": -100},
+        {"range": "not_a_number"},
+        {"range": None},
+    ],
+)
+def test_validate_record_accepts_non_positive_or_missing_range(valid_raw_cell, range_update):
+    record = valid_raw_cell.copy()
+    record.update(range_update)
+    assert validate_cell_record(record) is True
+
+    # Also verify that missing range key is accepted
+    record_no_range = valid_raw_cell.copy()
+    del record_no_range["range"]
+    assert validate_cell_record(record_no_range) is True
 
 
 def test_normalize_cell_record(valid_raw_cell):
@@ -64,6 +95,12 @@ def test_normalize_cell_record(valid_raw_cell):
     assert normalized["cell_id"] == 204868614
     assert normalized["source"] == "OpenCellID"
     assert normalized["retrieved_at"] == "2026-10-17T00:00:00Z"
+    assert normalized["is_range_estimated"] is False
+    assert normalized["range_is_fallback"] is False
+    assert normalized["range_source"] == "reported"
+    assert normalized["fallback_reason"] is None
+    assert normalized["raw_range"] == 1000
+    assert normalized["warnings"] == []
 
 
 def test_normalize_invalid_record_raises():
@@ -73,7 +110,7 @@ def test_normalize_invalid_record_raises():
 
 def test_parse_opencellid_response_success(valid_raw_cell):
     invalid_cell = valid_raw_cell.copy()
-    invalid_cell["range"] = 0
+    invalid_cell["lat"] = 95.0
 
     payload = {
         "count": 2,
@@ -84,6 +121,25 @@ def test_parse_opencellid_response_success(valid_raw_cell):
     assert records[0]["cell_id"] == 204868614
     assert len(warnings) == 1
     assert "Rejected invalid cell record" in warnings[0]
+
+
+def test_parse_opencellid_response_with_fallback(valid_raw_cell):
+    cell_zero_range = valid_raw_cell.copy()
+    cell_zero_range["range"] = 0
+    cell_zero_range["cellid"] = 999999
+
+    payload = {
+        "count": 2,
+        "cells": [valid_raw_cell, cell_zero_range],
+    }
+    records, warnings = parse_opencellid_response(payload)
+    assert len(records) == 2
+    assert records[0]["is_range_estimated"] is False
+    assert records[1]["is_range_estimated"] is True
+    assert records[1]["range_source"] == "fallback_default"
+    assert records[1]["range_m"] == 800.0  # LTE default
+    assert len(warnings) == 1
+    assert "applied default estimate of 800.0m" in warnings[0]
 
 
 def test_parse_opencellid_response_error_payload():
@@ -276,6 +332,133 @@ async def test_fetch_opencellid_records_fallback_on_network_failure(valid_raw_ce
     assert len(cells) == 1
     assert is_cached is True
     assert any("Serving cached fallback" in w for w in warnings)
+
+
+@pytest.mark.parametrize(
+    "radio, expected_radius",
+    [
+        ("GSM", 1000.0),
+        ("gsm", 1000.0),
+        ("2G", 1000.0),
+        ("CDMA", 1000.0),
+        ("cdma", 1000.0),
+        ("UMTS", 800.0),
+        ("umts", 800.0),
+        ("3G", 800.0),
+        ("LTE", 800.0),
+        ("lte", 800.0),
+        ("4G", 800.0),
+        ("NR", 500.0),
+        ("nr", 500.0),
+        ("5G", 500.0),
+        ("UNKNOWN", 800.0),
+        ("SATELLITE", 800.0),
+        ("", 800.0),
+        (None, 800.0),
+    ],
+)
+def test_fallback_radii_by_technology(valid_raw_cell, radio, expected_radius):
+    record = valid_raw_cell.copy()
+    if radio is None:
+        del record["radio"]
+    else:
+        record["radio"] = radio
+    del record["range"]
+
+    normalized = normalize_cell_record(record)
+    assert normalized["range_m"] == expected_radius
+    assert normalized["is_range_estimated"] is True
+    assert normalized["range_is_fallback"] is True
+    assert normalized["range_source"] == "fallback_default"
+    assert normalized["fallback_reason"] == "missing"
+    assert len(normalized["warnings"]) == 1
+    assert "applied default estimate" in normalized["warnings"][0]
+
+
+@pytest.mark.parametrize(
+    "range_val, expected_reason",
+    [
+        (0, "zero"),
+        (-50, "negative"),
+        ("abc", "non_numeric"),
+        (None, "null"),
+    ],
+)
+def test_fallback_reasons(valid_raw_cell, range_val, expected_reason):
+    record = valid_raw_cell.copy()
+    record["range"] = range_val
+    normalized = normalize_cell_record(record)
+    assert normalized["is_range_estimated"] is True
+    assert normalized["range_is_fallback"] is True
+    assert normalized["range_source"] == "fallback_default"
+    assert normalized["fallback_reason"] == expected_reason
+    assert normalized["raw_range"] == range_val
+    assert len(normalized["warnings"]) == 1
+    assert "applied default estimate" in normalized["warnings"][0]
+
+
+def test_fallback_outlier_high_clamped(valid_raw_cell):
+    record = valid_raw_cell.copy()
+    record["range"] = 50_000.0
+    normalized = normalize_cell_record(record)
+    assert normalized["range_m"] == 10_000.0
+    assert normalized["is_range_estimated"] is True
+    assert normalized["range_is_fallback"] is True
+    assert normalized["range_source"] == "fallback_clamped"
+    assert normalized["fallback_reason"] == "outlier"
+    assert len(normalized["warnings"]) == 1
+    assert "clamped to 10000.0m" in normalized["warnings"][0]
+
+
+def test_fallback_outlier_low_clamped(valid_raw_cell):
+    record = valid_raw_cell.copy()
+    record["range"] = 25.0
+    normalized = normalize_cell_record(record)
+    assert normalized["range_m"] == 50.0
+    assert normalized["is_range_estimated"] is True
+    assert normalized["range_is_fallback"] is True
+    assert normalized["range_source"] == "fallback_clamped"
+    assert normalized["fallback_reason"] == "outlier"
+    assert len(normalized["warnings"]) == 1
+    assert "clamped to 50.0m" in normalized["warnings"][0]
+
+
+@pytest.mark.parametrize("valid_range", [50.0, 500.0, 1000.0, 10000.0])
+def test_valid_reported_range_boundaries(valid_raw_cell, valid_range):
+    record = valid_raw_cell.copy()
+    record["range"] = valid_range
+    normalized = normalize_cell_record(record)
+    assert normalized["range_m"] == float(valid_range)
+    assert normalized["is_range_estimated"] is False
+    assert normalized["range_is_fallback"] is False
+    assert normalized["range_source"] == "reported"
+    assert normalized["fallback_reason"] is None
+    assert normalized["warnings"] == []
+
+
+def test_haversine_antipodal_points():
+    dist = haversine_distance(0.0, 0.0, 0.0, 180.0)
+    expected = math.pi * 6_371_000.0
+    assert abs(dist - expected) < 1.0
+
+
+def test_haversine_antimeridian_crossing():
+    dist = haversine_distance(0.0, 179.999, 0.0, -179.999)
+    expected = math.radians(0.002) * 6_371_000.0
+    assert abs(dist - expected) < 1.0
+
+
+def test_bounding_box_polar_protection():
+    latmin, lonmin, latmax, lonmax = calculate_bounding_box(90.0, 0.0, 1000.0)
+    assert latmax == 90.0
+    assert lonmin == -180.0
+    assert lonmax == 180.0
+
+    latmin_s, lonmin_s, latmax_s, lonmax_s = calculate_bounding_box(-90.0, 0.0, 1000.0)
+    assert latmin_s == -90.0
+    assert lonmin_s == -180.0
+    assert lonmax_s == 180.0
+
 
 
 

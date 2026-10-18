@@ -131,5 +131,6 @@ async def optimize_frequencies(request: OptimizeRequest):
         "best_algorithm": opt_results["best_algorithm"],
         "dsatur": opt_results["dsatur"],
         "welsh_powell": opt_results["welsh_powell"],
+        "exact": opt_results["exact"],
         "edges": edges,
     }
