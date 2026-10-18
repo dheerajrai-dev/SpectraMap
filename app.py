@@ -15,7 +15,6 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
 
 from data_service import fetch_opencellid_records, ATTRIBUTION_TEXT
 from graph_engine import (
@@ -23,6 +22,7 @@ from graph_engine import (
     optimize_graph_frequencies,
     get_interference_edges,
 )
+from schemas import OptimizeRequest
 
 # Load environment variables from .env file
 load_dotenv()
@@ -80,16 +80,6 @@ async def get_cells(
         "attribution": ATTRIBUTION_TEXT,
         "cached": is_cached,
     }
-
-
-class CenterCoordinates(BaseModel):
-    latitude: float = Field(..., ge=-90.0, le=90.0, description="Center latitude in degrees")
-    longitude: float = Field(..., ge=-180.0, le=180.0, description="Center longitude in degrees")
-
-
-class OptimizeRequest(BaseModel):
-    center: CenterCoordinates
-    radius_m: float = Field(1000.0, gt=0, le=5000.0, description="Analysis radius in metres")
 
 
 @app.post("/api/optimize")
