@@ -1,7 +1,6 @@
-
 # App-managed cache (cell records, API responses, cache metadata)
-# Never commit — may contain location-adjacent data or large API payloads.
 data/
+*.log
 
 # Python
 __pycache__/
@@ -23,3 +22,7 @@ dist/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Agent configuration and working folders
+.agents/
+.agent/
