@@ -9,12 +9,20 @@ API routes:
 """
 
 import os
+import time
+import uuid
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
 from data_service import fetch_opencellid_records, ATTRIBUTION_TEXT
+from graph_engine import (
+    build_interference_graph,
+    optimize_graph_frequencies,
+    get_interference_edges,
+)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -71,4 +79,63 @@ async def get_cells(
         "warnings": warnings,
         "attribution": ATTRIBUTION_TEXT,
         "cached": is_cached,
+    }
+
+
+class CenterCoordinates(BaseModel):
+    latitude: float = Field(..., ge=-90.0, le=90.0, description="Center latitude in degrees")
+    longitude: float = Field(..., ge=-180.0, le=180.0, description="Center longitude in degrees")
+
+
+class OptimizeRequest(BaseModel):
+    center: CenterCoordinates
+    radius_m: float = Field(1000.0, gt=0, le=5000.0, description="Analysis radius in metres")
+
+
+@app.post("/api/optimize")
+async def optimize_frequencies(request: OptimizeRequest):
+    """
+    Build interference graph and run DSatur and Welsh–Powell optimization.
+    Validates assignments, compares metrics, and returns map-ready results.
+    """
+    api_key = os.getenv("OPENCELLID_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="OpenCellID API key is not configured on the server. Please set OPENCELLID_API_KEY in .env.",
+        )
+
+    lat = request.center.latitude
+    lon = request.center.longitude
+    radius_m = request.radius_m
+
+    # 1. Fetch or load cached cell records for the requested area
+    cells, warnings, is_cached = await fetch_opencellid_records(lat, lon, radius_m, api_key)
+
+    # 2. Build the interference graph and measure build time
+    t0 = time.perf_counter()
+    graph = build_interference_graph(cells)
+    graph_build_ms = round((time.perf_counter() - t0) * 1000, 3)
+
+    # 3. Run dual-algorithm frequency allocation and validation
+    opt_results = optimize_graph_frequencies(graph)
+
+    # 4. Extract edge lines for visual map overlay
+    edges = get_interference_edges(graph)
+
+    result_id = uuid.uuid4().hex[:12]
+
+    return {
+        "result_id": result_id,
+        "center": {"latitude": lat, "longitude": lon},
+        "radius_m": radius_m,
+        "cached": is_cached,
+        "warnings": warnings,
+        "attribution": ATTRIBUTION_TEXT,
+        "graph_build_runtime_ms": graph_build_ms,
+        "metrics": opt_results["metrics"],
+        "best_algorithm": opt_results["best_algorithm"],
+        "dsatur": opt_results["dsatur"],
+        "welsh_powell": opt_results["welsh_powell"],
+        "edges": edges,
     }
