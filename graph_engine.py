@@ -171,3 +171,107 @@ def color_welsh_powell(graph: nx.Graph) -> dict[str, Any]:
         "validation": validation,
     }
 
+
+def color_dsatur(graph: nx.Graph) -> dict[str, Any]:
+    """
+    Color a graph using the DSatur (Degree of Saturation) algorithm.
+    1. Saturation degree: number of distinct colors assigned to a vertex's neighbors.
+    2. Dynamic selection: pick uncolored vertex with highest saturation degree.
+    3. Tie-breaking: highest total graph degree, then alphabetical node ID.
+    4. Color assignment: lowest available non-negative integer color.
+    """
+    start_time = time.perf_counter()
+
+    if graph.number_of_nodes() == 0:
+        return {
+            "algorithm": "DSatur",
+            "coloring": {},
+            "color_count": 0,
+            "runtime_ms": 0.0,
+            "validation": {
+                "is_valid": True,
+                "conflict_count": 0,
+                "conflicts": [],
+                "missing_count": 0,
+                "missing_nodes": [],
+                "color_count": 0,
+            },
+        }
+
+    coloring: dict[str, int] = {}
+    uncolored = set(graph.nodes())
+
+    while uncolored:
+        # Select the uncolored vertex with highest saturation degree
+        # Tie-breaker: highest graph degree, then alphabetical string ID
+        def dsatur_priority(node: str) -> tuple[int, int, str]:
+            neighbor_colors = {
+                coloring[nbr] for nbr in graph.neighbors(node) if nbr in coloring
+            }
+            sat_degree = len(neighbor_colors)
+            graph_degree = graph.degree(node)
+            return (-sat_degree, -graph_degree, str(node))
+
+        chosen_node = min(uncolored, key=dsatur_priority)
+
+        # Find the lowest available color not used by any colored neighbor
+        used_colors = {
+            coloring[nbr] for nbr in graph.neighbors(chosen_node) if nbr in coloring
+        }
+        color = 0
+        while color in used_colors:
+            color += 1
+
+        coloring[chosen_node] = color
+        uncolored.remove(chosen_node)
+
+    runtime_ms = round((time.perf_counter() - start_time) * 1000, 3)
+    validation = validate_coloring(graph, coloring)
+
+    return {
+        "algorithm": "DSatur",
+        "coloring": coloring,
+        "color_count": validation["color_count"],
+        "runtime_ms": runtime_ms,
+        "validation": validation,
+    }
+
+
+def optimize_graph_frequencies(graph: nx.Graph) -> dict[str, Any]:
+    """
+    Run both DSatur and Welsh–Powell on the same graph, validate both,
+    and choose the best valid result (fewer colors; tie-break: DSatur).
+    """
+    start_time = time.perf_counter()
+
+    dsatur_result = color_dsatur(graph)
+    wp_result = color_welsh_powell(graph)
+
+    # Determine default algorithm: fewer colors wins; if tied, default to DSatur
+    ds_valid = dsatur_result["validation"]["is_valid"]
+    wp_valid = wp_result["validation"]["is_valid"]
+
+    if ds_valid and wp_valid:
+        if dsatur_result["color_count"] <= wp_result["color_count"]:
+            best_algorithm = "DSatur"
+        else:
+            best_algorithm = "Welsh-Powell"
+    elif ds_valid:
+        best_algorithm = "DSatur"
+    elif wp_valid:
+        best_algorithm = "Welsh-Powell"
+    else:
+        best_algorithm = "None (both invalid)"
+
+    total_runtime_ms = round((time.perf_counter() - start_time) * 1000, 3)
+    metrics = get_graph_metrics(graph)
+
+    return {
+        "metrics": metrics,
+        "best_algorithm": best_algorithm,
+        "dsatur": dsatur_result,
+        "welsh_powell": wp_result,
+        "optimization_runtime_ms": total_runtime_ms,
+    }
+
+

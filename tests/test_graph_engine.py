@@ -5,6 +5,8 @@ from graph_engine import (
     get_interference_edges,
     validate_coloring,
     color_welsh_powell,
+    color_dsatur,
+    optimize_graph_frequencies,
 )
 
 
@@ -164,4 +166,67 @@ def test_welsh_powell_deterministic():
     for _ in range(10):
         subsequent_run = color_welsh_powell(G)["coloring"]
         assert first_run == subsequent_run
+
+
+def test_dsatur_path_graph():
+    # Path P3: A–B–C requires 2 colors
+    import networkx as nx
+    G = nx.Graph()
+    G.add_edges_from([("A", "B"), ("B", "C")])
+
+    res = color_dsatur(G)
+    assert res["validation"]["is_valid"] is True
+    assert res["color_count"] == 2
+    assert res["coloring"]["A"] != res["coloring"]["B"]
+    assert res["coloring"]["B"] != res["coloring"]["C"]
+    assert res["coloring"]["A"] == res["coloring"]["C"]
+
+
+def test_dsatur_clique():
+    # Complete graph K4 requires 4 colors
+    import networkx as nx
+    G = nx.complete_graph(4)
+
+    res = color_dsatur(G)
+    assert res["validation"]["is_valid"] is True
+    assert res["color_count"] == 4
+
+
+def test_dsatur_odd_cycle():
+    # Odd cycle C5 requires 3 colors
+    import networkx as nx
+    G = nx.cycle_graph(5)
+
+    res = color_dsatur(G)
+    assert res["validation"]["is_valid"] is True
+    assert res["color_count"] == 3
+
+
+def test_dsatur_deterministic():
+    # Ensure 10 runs produce identical assignments
+    import networkx as nx
+    G = nx.erdos_renyi_graph(20, 0.3, seed=42)
+
+    first_run = color_dsatur(G)["coloring"]
+    for _ in range(10):
+        subsequent_run = color_dsatur(G)["coloring"]
+        assert first_run == subsequent_run
+
+
+def test_optimize_graph_frequencies():
+    # Test full comparison runner on a 5-node graph
+    import networkx as nx
+    G = nx.cycle_graph(5)
+
+    opt = optimize_graph_frequencies(G)
+    assert "metrics" in opt
+    assert opt["metrics"]["node_count"] == 5
+    assert opt["metrics"]["edge_count"] == 5
+    assert opt["best_algorithm"] in ["DSatur", "Welsh-Powell"]
+    assert opt["dsatur"]["validation"]["is_valid"] is True
+    assert opt["welsh_powell"]["validation"]["is_valid"] is True
+    assert opt["dsatur"]["color_count"] == 3
+    assert opt["welsh_powell"]["color_count"] == 3
+    assert opt["optimization_runtime_ms"] >= 0
+
 
