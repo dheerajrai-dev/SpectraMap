@@ -8,6 +8,9 @@ from data_service import (
     calculate_bounding_box,
     filter_records_by_radius,
     fetch_opencellid_records,
+    save_cache,
+    load_cache,
+    load_cache_fallback,
 )
 
 
@@ -156,39 +159,123 @@ def test_filter_records_by_radius():
 
 
 @pytest.mark.anyio
-async def test_fetch_opencellid_records_mock_success(valid_raw_cell):
+async def test_fetch_opencellid_records_mock_success(valid_raw_cell, tmp_path):
     def mock_handler(request: httpx.Request):
         assert "key=test_key" in str(request.url)
         return httpx.Response(200, json={"count": 1, "cells": [valid_raw_cell]})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(mock_handler))
-    cells, warnings = await fetch_opencellid_records(
+    cells, warnings, is_cached = await fetch_opencellid_records(
         center_lat=28.63,
         center_lon=77.22,
         radius_m=1000.0,
         api_key="test_key",
         client=client,
+        cache_dir=str(tmp_path),
     )
     assert len(cells) == 1
     assert cells[0]["cell_id"] == 204868614
     assert warnings == []
+    assert is_cached is False
 
 
 @pytest.mark.anyio
-async def test_fetch_opencellid_records_mock_http_error():
+async def test_fetch_opencellid_records_mock_http_error(tmp_path):
     def mock_handler(request: httpx.Request):
         return httpx.Response(403, text="Invalid API key")
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(mock_handler))
-    cells, warnings = await fetch_opencellid_records(
+    cells, warnings, is_cached = await fetch_opencellid_records(
         center_lat=28.63,
         center_lon=77.22,
         radius_m=1000.0,
         api_key="bad_key",
         client=client,
+        cache_dir=str(tmp_path),
     )
     assert cells == []
     assert len(warnings) == 1
     assert "OpenCellID HTTP 403" in warnings[0]
+    assert is_cached is False
+
+
+def test_cache_save_and_load(tmp_path):
+    bbox = "28.6000_77.2000_28.6100_77.2100"
+    records = [{"tower_id": "test_1", "latitude": 28.605, "longitude": 77.205}]
+
+    file_path = save_cache(bbox, records, is_partial=False, cache_dir=tmp_path)
+    assert file_path is not None
+    assert file_path.exists()
+
+    loaded = load_cache(bbox, max_age_seconds=60, cache_dir=tmp_path)
+    assert loaded is not None
+    assert loaded["bbox"] == bbox
+    assert loaded["record_count"] == 1
+    assert loaded["records"] == records
+
+
+def test_cache_expiration(tmp_path):
+    bbox = "28.6000_77.2000_28.6100_77.2100"
+    save_cache(bbox, [], is_partial=False, cache_dir=tmp_path)
+
+    # With max_age_seconds = 0, cache is treated as expired
+    loaded = load_cache(bbox, max_age_seconds=0, cache_dir=tmp_path)
+    assert loaded is None
+
+    # Fallback loader ignores expiration
+    fallback = load_cache_fallback(bbox, cache_dir=tmp_path)
+    assert fallback is not None
+
+
+@pytest.mark.anyio
+async def test_fetch_opencellid_records_cache_hit(valid_raw_cell, tmp_path):
+    call_count = 0
+
+    def mock_handler(request: httpx.Request):
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(200, json={"count": 1, "cells": [valid_raw_cell]})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(mock_handler))
+
+    # First fetch: calls network, saves cache, returns is_cached=False
+    cells1, _, is_cached1 = await fetch_opencellid_records(
+        28.63, 77.22, 1000.0, "key", client=client, cache_dir=str(tmp_path)
+    )
+    assert len(cells1) == 1
+    assert is_cached1 is False
+    assert call_count == 1
+
+    # Second fetch: serves from cache, does NOT call network again
+    cells2, _, is_cached2 = await fetch_opencellid_records(
+        28.63, 77.22, 1000.0, "key", client=client, cache_dir=str(tmp_path)
+    )
+    assert len(cells2) == 1
+    assert is_cached2 is True
+    assert call_count == 1  # Network handler was not called a second time
+
+
+@pytest.mark.anyio
+async def test_fetch_opencellid_records_fallback_on_network_failure(valid_raw_cell, tmp_path):
+    # Pre-populate cache
+    latmin, lonmin, latmax, lonmax = calculate_bounding_box(28.63, 77.22, 1000.0)
+    bbox_str = f"{latmin:.4f},{lonmin:.4f},{latmax:.4f},{lonmax:.4f}"
+    normalized = normalize_cell_record(valid_raw_cell)
+    save_cache(bbox_str, [normalized], cache_dir=str(tmp_path))
+
+    # Network client that fails with 500
+    def mock_handler(request: httpx.Request):
+        return httpx.Response(500, text="Internal Server Error")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(mock_handler))
+
+    # Request with cache_ttl_seconds=0 forces network call, which fails, triggering fallback
+    cells, warnings, is_cached = await fetch_opencellid_records(
+        28.63, 77.22, 1000.0, "key", client=client, cache_dir=str(tmp_path), cache_ttl_seconds=0
+    )
+    assert len(cells) == 1
+    assert is_cached is True
+    assert any("Serving cached fallback" in w for w in warnings)
+
 
 

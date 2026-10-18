@@ -3,7 +3,9 @@ data_service.py — OpenCellID data fetching, normalization, and cache
 """
 
 from datetime import datetime, timezone
+import json
 import math
+from pathlib import Path
 from typing import Any
 import httpx
 
@@ -175,20 +177,102 @@ def parse_opencellid_response(payload: Any) -> tuple[list[dict[str, Any]], list[
     return records, warnings
 
 
+def get_cache_filepath(bbox_str: str, cache_dir: Path | str = "data") -> Path:
+    """Return local cache file path for a given bounding box string."""
+    safe_name = f"cache_{bbox_str.replace(',', '_')}.json"
+    return Path(cache_dir) / safe_name
+
+
+def save_cache(
+    bbox_str: str,
+    records: list[dict[str, Any]],
+    is_partial: bool = False,
+    cache_dir: Path | str = "data",
+) -> Path | None:
+    """Save normalized records and area metadata to disk."""
+    try:
+        dir_path = Path(cache_dir)
+        dir_path.mkdir(parents=True, exist_ok=True)
+        file_path = get_cache_filepath(bbox_str, cache_dir=dir_path)
+
+        data = {
+            "bbox": bbox_str,
+            "retrieved_at": datetime.now(timezone.utc).isoformat(),
+            "source": "OpenCellID",
+            "record_count": len(records),
+            "is_partial": is_partial,
+            "records": records,
+        }
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        return file_path
+    except OSError:
+        return None
+
+
+def load_cache(
+    bbox_str: str,
+    max_age_seconds: float | None = 86400,
+    cache_dir: Path | str = "data",
+) -> dict[str, Any] | None:
+    """
+    Load cached records if file exists and is within max_age_seconds.
+    Returns parsed dictionary or None.
+    """
+    file_path = get_cache_filepath(bbox_str, cache_dir=cache_dir)
+    if not file_path.exists():
+        return None
+
+    try:
+        # Check cache age if max_age_seconds is specified
+        if max_age_seconds is not None:
+            age = datetime.now().timestamp() - file_path.stat().st_mtime
+            if age > max_age_seconds:
+                return None
+
+        with open(file_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def load_cache_fallback(
+    bbox_str: str,
+    cache_dir: Path | str = "data",
+) -> dict[str, Any] | None:
+    """Load cached records regardless of file age as a resilient fallback."""
+    return load_cache(bbox_str, max_age_seconds=None, cache_dir=cache_dir)
+
+
 async def fetch_opencellid_records(
     center_lat: float,
     center_lon: float,
     radius_m: float,
     api_key: str,
     client: httpx.AsyncClient | None = None,
-) -> tuple[list[dict[str, Any]], list[str]]:
+    cache_dir: str = "data",
+    cache_ttl_seconds: float = 86400.0,
+) -> tuple[list[dict[str, Any]], list[str], bool]:
     """
     Fetch, parse, and radius-filter cell records from OpenCellID around a geographic center.
+    Uses local cache when available, with last-known-good fallback on failure.
+    Returns (records, warnings, is_cached).
     """
     # 1. Calculate bounding box for the requested radius
     latmin, lonmin, latmax, lonmax = calculate_bounding_box(center_lat, center_lon, radius_m)
     bbox_str = f"{latmin:.4f},{lonmin:.4f},{latmax:.4f},{lonmax:.4f}"
 
+    # 2. Check for fresh cached data before hitting the network
+    cached_payload = load_cache(bbox_str, max_age_seconds=cache_ttl_seconds, cache_dir=cache_dir)
+    if cached_payload and "records" in cached_payload:
+        records = cached_payload["records"]
+        filtered = filter_records_by_radius(records, center_lat, center_lon, radius_m)
+        warnings: list[str] = []
+        if cached_payload.get("is_partial"):
+            warnings.append("Cached records represent a partial area query.")
+        return filtered, warnings, True
+
+    # 3. Query OpenCellID area endpoint
     params = {
         "key": api_key,
         "BBOX": bbox_str,
@@ -201,28 +285,42 @@ async def fetch_opencellid_records(
         should_close = True
 
     try:
-        # 2. Query OpenCellID area endpoint
         response = await client.get(OPENCELLID_AREA_URL, params=params)
         if response.status_code != 200:
-            return [], [f"OpenCellID HTTP {response.status_code}: {response.text}"]
+            error_msg = f"OpenCellID HTTP {response.status_code}: {response.text}"
+            fallback = load_cache_fallback(bbox_str, cache_dir=cache_dir)
+            if fallback and "records" in fallback:
+                filtered = filter_records_by_radius(fallback["records"], center_lat, center_lon, radius_m)
+                time_str = fallback.get("retrieved_at", "unknown date")
+                return filtered, [f"{error_msg}. Serving cached fallback from {time_str}."], True
+            return [], [error_msg], False
 
-        # 3. Parse and normalize records
+        # 4. Parse and normalize records
         payload = response.json()
         records, warnings = parse_opencellid_response(payload)
 
-        # 4. Filter records strictly within the circle
-        filtered = filter_records_by_radius(records, center_lat, center_lon, radius_m)
-
-        # 5. Check if provider hit its 50-record cap
-        if len(payload.get("cells", [])) >= 50:
+        is_partial = len(payload.get("cells", [])) >= 50
+        if is_partial:
             warnings.append(
                 "Reached OpenCellID 50-record limit for area query; results may be partial."
             )
 
-        return filtered, warnings
-    except httpx.RequestError as exc:
-        return [], [f"OpenCellID connection error: {str(exc)}"]
+        # 5. Save accepted records to local cache
+        save_cache(bbox_str, records, is_partial=is_partial, cache_dir=cache_dir)
+
+        # 6. Filter records strictly within the circle
+        filtered = filter_records_by_radius(records, center_lat, center_lon, radius_m)
+        return filtered, warnings, False
+    except (httpx.RequestError, ValueError) as exc:
+        error_msg = f"OpenCellID connection error: {str(exc)}"
+        fallback = load_cache_fallback(bbox_str, cache_dir=cache_dir)
+        if fallback and "records" in fallback:
+            filtered = filter_records_by_radius(fallback["records"], center_lat, center_lon, radius_m)
+            time_str = fallback.get("retrieved_at", "unknown date")
+            return filtered, [f"{error_msg}. Serving cached fallback from {time_str}."], True
+        return [], [error_msg], False
     finally:
         if should_close:
             await client.aclose()
+
 

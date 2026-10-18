@@ -59,8 +59,8 @@ async def get_cells(
             detail="OpenCellID API key is not configured on the server. Please set OPENCELLID_API_KEY in .env.",
         )
 
-    # 2. Fetch and filter records via data_service
-    cells, warnings = await fetch_opencellid_records(lat, lon, radius_m, api_key)
+    # 2. Fetch and filter records via data_service (with caching and fallback)
+    cells, warnings, is_cached = await fetch_opencellid_records(lat, lon, radius_m, api_key)
 
     # 3. Return standardized API response
     return {
@@ -70,5 +70,5 @@ async def get_cells(
         "cells": cells,
         "warnings": warnings,
         "attribution": ATTRIBUTION_TEXT,
-        "cached": False,
+        "cached": is_cached,
     }

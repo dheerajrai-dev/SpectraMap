@@ -45,7 +45,7 @@ def test_cells_endpoint_success(client, monkeypatch):
                 "cell_id": 123,
                 "source": "OpenCellID",
             }
-        ], []
+        ], [], False
 
     monkeypatch.setattr("app.fetch_opencellid_records", mock_fetch)
 
@@ -57,3 +57,17 @@ def test_cells_endpoint_success(client, monkeypatch):
     assert data["center"]["longitude"] == 77.22
     assert "OpenCellID" in data["attribution"]
     assert data["cells"][0]["cell_id"] == 123
+    assert data["cached"] is False
+
+
+def test_cells_endpoint_cached_flag(client, monkeypatch):
+    async def mock_fetch(lat, lon, radius_m, api_key):
+        return [], [], True
+
+    monkeypatch.setattr("app.fetch_opencellid_records", mock_fetch)
+
+    response = client.get("/api/cells?lat=28.63&lon=77.22&radius_m=1000")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["cached"] is True
+
