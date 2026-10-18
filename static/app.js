@@ -6,7 +6,7 @@
  * 2. Backend health check (/api/status).
  * 3. Area selection (dragging center marker, map click, geolocation, radius slider).
  * 4. Fetching cell tower records (/api/cells) and rendering interactive markers.
- * 5. Optimization runner (/api/optimize) and algorithm scoreboard (Step 7).
+ * 5. Optimization runner (/api/optimize), interference lines, marker coloring, and algorithm scoreboard.
  */
 
 // Global state
@@ -14,11 +14,14 @@ const state = {
     map: null,
     centerMarker: null,
     searchCircle: null,
-    currentCenter: { lat: 28.6000, lon: 77.2000 }, // Default: South Delhi (has rich cell data)
+    currentCenter: { lat: 28.6000, lon: 77.2000 }, // Default: South Delhi (rich cellular data)
     radiusMetres: 700,
     cells: [],
+    cellsById: {},
     markersById: {},
     interferenceEdges: [],
+    optimizationResults: null,
+    activeAlgorithm: "both",
     cellMarkersLayer: null,
     coverageCirclesLayer: null,
     edgesLayer: null,
@@ -122,7 +125,7 @@ function setNewCenter(lat, lon) {
 }
 
 /**
- * Hooks up UI event listeners (slider, buttons, checkboxes).
+ * Hooks up UI event listeners (slider, buttons, checkboxes, dropdowns).
  */
 function initControls() {
     // Radius slider
@@ -148,6 +151,39 @@ function initControls() {
     const btnFetch = document.getElementById("btn-fetch");
     if (btnFetch) {
         btnFetch.addEventListener("click", fetchNearbyCells);
+    }
+
+    // "Optimize Frequencies" button
+    const btnOptimize = document.getElementById("btn-optimize");
+    if (btnOptimize) {
+        btnOptimize.addEventListener("click", runFrequencyOptimization);
+    }
+
+    // Toggle interference lines checkbox
+    const toggleEdges = document.getElementById("toggle-edges");
+    if (toggleEdges) {
+        toggleEdges.addEventListener("change", (e) => {
+            if (e.target.checked) {
+                if (!state.map.hasLayer(state.edgesLayer)) {
+                    state.map.addLayer(state.edgesLayer);
+                }
+            } else {
+                if (state.map.hasLayer(state.edgesLayer)) {
+                    state.map.removeLayer(state.edgesLayer);
+                }
+            }
+        });
+    }
+
+    // Algorithm selection dropdown
+    const algoSelect = document.getElementById("algo-select");
+    if (algoSelect) {
+        algoSelect.addEventListener("change", (e) => {
+            state.activeAlgorithm = e.target.value;
+            if (state.optimizationResults) {
+                applyActiveColoring();
+            }
+        });
     }
 }
 
@@ -258,8 +294,11 @@ function renderCellTowers(cells) {
     state.coverageCirclesLayer.clearLayers();
     state.edgesLayer.clearLayers();
     state.markersById = {};
+    state.cellsById = {};
 
     cells.forEach((cell) => {
+        state.cellsById[cell.tower_id] = cell;
+
         // 1. Faint coverage circle showing transmission range
         const coverageCircle = L.circle([cell.latitude, cell.longitude], {
             radius: cell.range_m,
@@ -306,8 +345,213 @@ function renderCellTowers(cells) {
 
         marker.bindPopup(popupContent);
         state.cellMarkersLayer.addLayer(marker);
-        state.markersById[cell.cell_id] = marker;
+        state.markersById[cell.tower_id] = marker;
     });
+}
+
+/**
+ * Calls POST /api/optimize, displays metrics on scoreboard,
+ * renders interference lines, and recolours cell markers by assigned frequency.
+ */
+async function runFrequencyOptimization() {
+    const btnOptimize = document.getElementById("btn-optimize");
+    const statusMsg = document.getElementById("cells-status");
+
+    btnOptimize.disabled = true;
+    btnOptimize.textContent = "Optimizing...";
+    statusMsg.textContent = "Running Welsh-Powell & DSATUR algorithms on backend...";
+    statusMsg.style.color = "var(--text-secondary)";
+
+    try {
+        const payload = {
+            center: {
+                latitude: state.currentCenter.lat,
+                longitude: state.currentCenter.lon,
+            },
+            radius_m: state.radiusMetres,
+        };
+
+        const res = await fetch("/api/optimize", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+            const err = data.detail || `Optimization failed (HTTP ${res.status})`;
+            throw new Error(err);
+        }
+
+        state.optimizationResults = {
+            welsh_powell: data.welsh_powell,
+            dsatur: data.dsatur,
+        };
+        state.interferenceEdges = data.edges || [];
+
+        // 1. Populate scoreboard metrics
+        const m = data.metrics || {};
+        document.getElementById("metric-towers").textContent = m.node_count ?? state.cells.length;
+        document.getElementById("metric-edges").textContent = m.edge_count ?? 0;
+        document.getElementById("metric-degree").textContent = m.max_degree ?? 0;
+        document.getElementById("metric-density").textContent = `${((m.density ?? 0) * 100).toFixed(1)}%`;
+
+        // 2. Populate comparison table
+        const wp = data.welsh_powell;
+        const ds = data.dsatur;
+
+        if (wp) {
+            const isValid = wp.validation?.is_valid ?? wp.is_valid;
+            document.getElementById("res-wp-colors").textContent = `${wp.color_count} colors (${wp.runtime_ms.toFixed(2)} ms)`;
+            document.getElementById("res-wp-valid").innerHTML = isValid
+                ? '<span style="color: var(--accent-success)">✔ Valid</span>'
+                : '<span style="color: var(--accent-error)">✖ Collision</span>';
+        }
+
+        if (ds) {
+            const isValid = ds.validation?.is_valid ?? ds.is_valid;
+            document.getElementById("res-dsatur-colors").textContent = `${ds.color_count} colors (${ds.runtime_ms.toFixed(2)} ms)`;
+            document.getElementById("res-dsatur-valid").innerHTML = isValid
+                ? '<span style="color: var(--accent-success)">✔ Valid</span>'
+                : '<span style="color: var(--accent-error)">✖ Collision</span>';
+        }
+
+        // 3. Render interference edge polylines
+        renderInterferenceEdges(state.interferenceEdges);
+
+        // 4. Color cell markers according to the active algorithm
+        applyActiveColoring();
+
+        statusMsg.textContent = `Optimization complete! DSATUR: ${ds?.color_count} frequencies, Welsh-Powell: ${wp?.color_count} frequencies.`;
+        statusMsg.style.color = "var(--accent-success)";
+    } catch (err) {
+        console.error("Optimization failed:", err);
+        statusMsg.textContent = `Error: ${err.message}`;
+        statusMsg.style.color = "var(--accent-error)";
+    } finally {
+        btnOptimize.disabled = false;
+        btnOptimize.textContent = "Optimize Frequencies";
+    }
+}
+
+/**
+ * Draws polyline edges between towers that interfere with each other.
+ */
+function renderInterferenceEdges(edges) {
+    state.edgesLayer.clearLayers();
+
+    edges.forEach((edge) => {
+        const line = L.polyline(
+            [edge.source_coords, edge.target_coords],
+            {
+                color: "#ef4444",
+                weight: 2,
+                opacity: 0.65,
+                dashArray: "4, 4",
+            }
+        );
+
+        line.bindTooltip(
+            `Interference: ${edge.source_id} ↔ ${edge.target_id} (${Math.round(edge.distance_m)}m)`,
+            { sticky: true }
+        );
+
+        state.edgesLayer.addLayer(line);
+    });
+
+    const toggle = document.getElementById("toggle-edges");
+    if (toggle && !toggle.checked) {
+        if (state.map.hasLayer(state.edgesLayer)) {
+            state.map.removeLayer(state.edgesLayer);
+        }
+    } else {
+        if (!state.map.hasLayer(state.edgesLayer)) {
+            state.map.addLayer(state.edgesLayer);
+        }
+    }
+}
+
+/**
+ * Updates marker colors and popup details to reflect the chosen algorithm's coloring.
+ */
+function applyActiveColoring() {
+    if (!state.optimizationResults) return;
+
+    // Pick algorithm result based on selector:
+    // If 'welsh_powell', use Welsh-Powell; otherwise default to DSATUR
+    const algoKey = state.activeAlgorithm === "welsh_powell" ? "welsh_powell" : "dsatur";
+    const algoResult = state.optimizationResults[algoKey];
+    if (!algoResult || !algoResult.coloring) return;
+
+    const coloring = algoResult.coloring;
+    const maxFreq = algoResult.color_count || 1;
+
+    // 1. Recolour each marker
+    Object.entries(coloring).forEach(([towerId, freq]) => {
+        const marker = state.markersById[towerId];
+        const cell = state.cellsById[towerId];
+        if (!marker || !cell) return;
+
+        const color = FREQUENCY_COLORS[(freq - 1) % FREQUENCY_COLORS.length];
+        marker.setStyle({
+            fillColor: color,
+            color: "#ffffff",
+            weight: 2,
+            fillOpacity: 0.95,
+        });
+
+        // Update popup with assigned frequency
+        const algoName = algoKey === "welsh_powell" ? "Welsh-Powell" : "DSATUR";
+        const popupContent = `
+            <div class="tower-popup">
+                <div class="tower-popup-header">
+                    <span class="tower-popup-title">Cell #${cell.cell_id}</span>
+                    <span class="radio-badge">${cell.radio}</span>
+                </div>
+                <div class="tower-popup-details">
+                    <span class="label">Assigned Freq:</span>
+                    <span class="val" style="color: ${color}; font-weight: 700;">Channel f${freq} (${algoName})</span>
+                    <span class="label">Latitude:</span>
+                    <span class="val">${cell.latitude.toFixed(5)}°</span>
+                    <span class="label">Longitude:</span>
+                    <span class="val">${cell.longitude.toFixed(5)}°</span>
+                    <span class="label">Coverage:</span>
+                    <span class="val">${Math.round(cell.range_m)} m</span>
+                    <span class="label">MCC / MNC:</span>
+                    <span class="val">${cell.mcc ?? "-"} / ${cell.mnc ?? "-"}</span>
+                    <span class="label">LAC:</span>
+                    <span class="val">${cell.lac ?? "-"}</span>
+                </div>
+            </div>
+        `;
+        marker.setPopupContent(popupContent);
+    });
+
+    // 2. Render color palette legend
+    renderLegend(maxFreq, algoKey);
+}
+
+/**
+ * Renders the frequency color palette legend chips.
+ */
+function renderLegend(maxFreq, algoKey) {
+    const legendContainer = document.getElementById("legend-container");
+    const legendItems = document.getElementById("legend-items");
+    if (!legendContainer || !legendItems) return;
+
+    legendItems.innerHTML = "";
+    for (let f = 1; f <= maxFreq; f++) {
+        const color = FREQUENCY_COLORS[(f - 1) % FREQUENCY_COLORS.length];
+        const chip = document.createElement("div");
+        chip.className = "legend-chip";
+        chip.innerHTML = `
+            <span class="legend-color-dot" style="background-color: ${color};"></span>
+            <span>Freq ${f} (f${f})</span>
+        `;
+        legendItems.appendChild(chip);
+    }
+
+    legendContainer.style.display = "block";
 }
 
 /**
