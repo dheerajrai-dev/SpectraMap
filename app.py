@@ -244,7 +244,10 @@ async def build_graph_endpoint(request: GraphBuildRequest):
 
     payload = serialize_graph_payload(graph)
     payload["build_runtime_ms"] = build_time_ms
+    if payload.get("metrics", {}).get("data_unsuitable_reason"):
+        warnings.append(payload["metrics"]["data_unsuitable_reason"])
     payload["warnings"] = warnings
+    payload["diagnostics"] = payload.get("metrics")
 
     return payload
 
@@ -335,6 +338,8 @@ async def optimize_frequencies(request: OptimizeRequest):
     # 4. Extract edge lines for visual map overlay
     edges = get_interference_edges(graph)
     result_id = uuid.uuid4().hex[:12]
+    if opt_results["metrics"].get("data_unsuitable_reason"):
+        warnings.append(opt_results["metrics"]["data_unsuitable_reason"])
 
     return {
         "result_id": result_id,
@@ -347,6 +352,7 @@ async def optimize_frequencies(request: OptimizeRequest):
         "algorithm": request.algorithm,
         "assignments": assignments,
         "metrics": opt_results["metrics"],
+        "diagnostics": opt_results["metrics"],
         "best_algorithm": opt_results["best_algorithm"],
         "dsatur": opt_results["dsatur"],
         "welsh_powell": opt_results["welsh_powell"],
@@ -402,8 +408,12 @@ async def compare_algorithms_endpoint(request: CompareRequest):
     else:
         summary = f"Both DSatur and Welsh–Powell achieved the identical color count ({dsatur_res['color_count']} channels)."
 
+    if metrics.get("data_unsuitable_reason"):
+        warnings.append(metrics["data_unsuitable_reason"])
+
     return {
         "metrics": metrics,
+        "diagnostics": metrics,
         "dsatur": dsatur_res,
         "welsh_powell": wp_res,
         "exact": exact_res,

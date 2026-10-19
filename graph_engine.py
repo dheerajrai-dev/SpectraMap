@@ -3,7 +3,9 @@ graph_engine.py — Interference graph construction and coloring algorithms
 """
 
 import itertools
+import statistics
 import time
+from collections import Counter
 from typing import Any
 import networkx as nx
 from data_service import haversine_distance
@@ -19,6 +21,9 @@ def build_interference_graph(
     - Edge E: Added between cells (u, v) if haversine_distance(u, v) <= range_u + range_v.
     - If radius_override_m is provided and > 0, it overrides range_m for edge calculation
       while preserving the original range_m in node attributes.
+    - Tracks diagnostic metrics: candidate pairs examined, edges accepted/rejected,
+      min/median/max radius, min/median/max pairwise distance, coordinate diversity,
+      and data suitability.
     """
     G = nx.Graph()
 
@@ -51,33 +56,108 @@ def build_interference_graph(
 
     # 2. Check all unique pairs for coverage circle overlap
     cell_nodes = list(G.nodes(data=True))
-    for (id_a, data_a), (id_b, data_b) in itertools.combinations(cell_nodes, 2):
+    candidate_pairs = list(itertools.combinations(cell_nodes, 2))
+    candidate_pairs_count = len(candidate_pairs)
+    edges_accepted = 0
+    edges_rejected = 0
+    pairwise_distances: list[float] = []
+    sample_accepted: list[dict[str, Any]] = []
+    sample_rejected: list[dict[str, Any]] = []
+
+    for (id_a, data_a), (id_b, data_b) in candidate_pairs:
         dist = haversine_distance(
             data_a["latitude"], data_a["longitude"],
             data_b["latitude"], data_b["longitude"],
         )
         threshold = data_a["effective_range_m"] + data_b["effective_range_m"]
+        pairwise_distances.append(dist)
 
         # Overlapping coverage circles indicate potential radio interference (closed disk <=)
-        if dist <= threshold:
+        # Uses 1e-6m (1 micrometre) numerical epsilon for IEEE 754 trigonometry precision
+        if dist <= threshold + 1e-6:
+            edges_accepted += 1
+            reason = f"d({round(dist, 1)}m) <= r_u({round(data_a['effective_range_m'], 1)}m) + r_v({round(data_b['effective_range_m'], 1)}m)"
             G.add_edge(
                 id_a,
                 id_b,
                 distance_m=round(dist, 1),
                 threshold_m=round(threshold, 1),
                 rule="d(u, v) <= r_u + r_v",
+                reason=reason,
             )
+            if len(sample_accepted) < 5:
+                sample_accepted.append({
+                    "source": id_a,
+                    "target": id_b,
+                    "distance_m": round(dist, 1),
+                    "threshold_m": round(threshold, 1),
+                    "reason": reason,
+                })
+        else:
+            edges_rejected += 1
+            if len(sample_rejected) < 5:
+                sample_rejected.append({
+                    "source": id_a,
+                    "target": id_b,
+                    "distance_m": round(dist, 1),
+                    "threshold_m": round(threshold, 1),
+                    "reason": f"d({round(dist, 1)}m) > r_u + r_v ({round(threshold, 1)}m)",
+                })
 
     # 3. Store calculated degree on each node
     for node_id in G.nodes():
         G.nodes[node_id]["degree"] = G.degree(node_id)
+
+    # 4. Compute and attach diagnostic statistics to G.graph
+    radii = [data["effective_range_m"] for _, data in cell_nodes]
+    coords = [(data["latitude"], data["longitude"]) for _, data in cell_nodes]
+    unique_coords = set(coords)
+    co_located_pairs = sum(1 for d in pairwise_distances if d == 0.0)
+
+    min_rad = round(min(radii), 1) if radii else 0.0
+    med_rad = round(float(statistics.median(radii)), 1) if radii else 0.0
+    max_rad = round(max(radii), 1) if radii else 0.0
+
+    min_dist = round(min(pairwise_distances), 1) if pairwise_distances else 0.0
+    med_dist = round(float(statistics.median(pairwise_distances)), 1) if pairwise_distances else 0.0
+    max_dist = round(max(pairwise_distances), 1) if pairwise_distances else 0.0
+
+    is_unsuitable = (len(unique_coords) == 1 and len(cell_nodes) > 1)
+    unsuitable_reason = None
+    if is_unsuitable:
+        loc = list(unique_coords)[0]
+        unsuitable_reason = (
+            f"All {len(cell_nodes)} cell records are co-located at identical coordinates ({loc[0]:.5f}, {loc[1]:.5f}) "
+            f"(single cell mast/grid centroid, pairwise distance = 0.0m). Under circular coverage overlap "
+            f"d(u, v) <= r_u + r_v, every pair conflicts, forming a complete clique K_{len(cell_nodes)}. "
+            f"For spatial frequency-reuse demonstration across separate towers, expand search radius or use Demo Grid."
+        )
+
+    G.graph["diagnostics"] = {
+        "candidate_pairs_examined": candidate_pairs_count,
+        "edges_accepted": edges_accepted,
+        "edges_rejected": edges_rejected,
+        "min_radius_m": min_rad,
+        "median_radius_m": med_rad,
+        "max_radius_m": max_rad,
+        "min_distance_m": min_dist,
+        "median_distance_m": med_dist,
+        "max_distance_m": max_dist,
+        "valid_coordinates_count": len(coords),
+        "unique_coordinates_count": len(unique_coords),
+        "co_located_pairs_count": co_located_pairs,
+        "sample_accepted_edges": sample_accepted,
+        "sample_rejected_pairs": sample_rejected,
+        "data_unsuitable": is_unsuitable,
+        "data_unsuitable_reason": unsuitable_reason,
+    }
 
     return G
 
 
 def get_graph_metrics(graph: nx.Graph) -> dict[str, Any]:
     """
-    Compute basic structural metrics for the interference graph.
+    Compute structural metrics and diagnostics for the interference graph.
     """
     node_count = graph.number_of_nodes()
     edge_count = graph.number_of_edges()
@@ -99,6 +179,13 @@ def get_graph_metrics(graph: nx.Graph) -> dict[str, Any]:
     # Brooks' theorem upper bound: chi(G) <= Delta(G) + 1
     brooks_ub = (max_deg + 1) if node_count > 0 else 0
 
+    degree_counts = Counter(deg for _, deg in graph.degree())
+    degree_dist = {int(k): int(v) for k, v in sorted(degree_counts.items())}
+
+    diag = graph.graph.get("diagnostics", {})
+    pairs_examined = diag.get("candidate_pairs_examined", (node_count * (node_count - 1)) // 2 if node_count > 1 else 0)
+    edges_rejected = diag.get("edges_rejected", max(0, pairs_examined - edge_count))
+
     return {
         "node_count": node_count,
         "vertex_count": node_count,
@@ -109,7 +196,27 @@ def get_graph_metrics(graph: nx.Graph) -> dict[str, Any]:
         "avg_degree": avg_deg,
         "clique_lower_bound": clique_lb,
         "brooks_upper_bound": brooks_ub,
+        "degree_distribution": degree_dist,
+        "candidate_pairs_examined": pairs_examined,
+        "edges_accepted": edge_count,
+        "edges_rejected": edges_rejected,
+        "unique_coordinates_count": diag.get("unique_coordinates_count", 0),
+        "min_radius_m": diag.get("min_radius_m", 0.0),
+        "median_radius_m": diag.get("median_radius_m", 0.0),
+        "max_radius_m": diag.get("max_radius_m", 0.0),
+        "min_distance_m": diag.get("min_distance_m", 0.0),
+        "median_distance_m": diag.get("median_distance_m", 0.0),
+        "max_distance_m": diag.get("max_distance_m", 0.0),
+        "sample_accepted_edges": diag.get("sample_accepted_edges", []),
+        "sample_rejected_pairs": diag.get("sample_rejected_pairs", []),
+        "data_unsuitable": diag.get("data_unsuitable", False),
+        "data_unsuitable_reason": diag.get("data_unsuitable_reason"),
     }
+
+
+def get_graph_diagnostics(graph: nx.Graph) -> dict[str, Any]:
+    """Retrieve full diagnostic dictionary for the interference graph."""
+    return get_graph_metrics(graph)
 
 
 def get_interference_edges(graph: nx.Graph) -> list[dict[str, Any]]:

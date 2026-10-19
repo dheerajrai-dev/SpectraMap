@@ -560,7 +560,7 @@ function loadDemoTowers() {
             radio: i % 3 === 0 ? "5G NR" : "4G LTE",
             latitude: Number((center.lat + dLat).toFixed(5)),
             longitude: Number((center.lon + dLon).toFixed(5)),
-            range_m: 850.0,
+            range_m: 350.0,
             mcc: 404,
             mnc: 11,
             lac: 50001,
@@ -1233,8 +1233,13 @@ async function runFrequencyOptimization() {
         if (ex?.proven_optimal) {
             summaryText += ` Proven minimum chromatic number χ(G) = ${ex.color_count}.`;
         }
-        statusMsg.textContent = summaryText;
-        statusMsg.style.color = "var(--accent-emerald)";
+        if (data.metrics?.data_unsuitable) {
+            statusMsg.innerHTML = `${summaryText} <br><strong style="color:var(--accent-amber);">⚠️ Data Notice:</strong> All ${state.cells.length} towers are co-located at the same coordinates (0m separation), forming a complete clique K<sub>${state.cells.length}</sub>. Click <em>'⚡ Demo Grid'</em> or increase search radius to observe frequency reuse across geographically separated sites.`;
+            statusMsg.style.color = "var(--accent-amber)";
+        } else {
+            statusMsg.textContent = summaryText;
+            statusMsg.style.color = "var(--accent-emerald)";
+        }
     } catch (err) {
         console.error("Optimization failed:", err);
         statusMsg.textContent = `Error: ${err.message}`;
@@ -1580,8 +1585,13 @@ async function buildInterferenceGraphUI(userInitiated = false) {
         if (btnCompare) btnCompare.disabled = false;
 
         if (statusMsg) {
-            statusMsg.textContent = `Graph built: ${data.nodes.length} vertices, ${data.edges.length} conflict edges (overlap: d <= r1 + r2).`;
-            statusMsg.style.color = "var(--accent-emerald)";
+            if (m.data_unsuitable) {
+                statusMsg.innerHTML = `Graph built: ${data.nodes.length} vertices, ${data.edges.length} edges (complete clique K<sub>${data.nodes.length}</sub>). <br><strong style="color:var(--accent-amber);">⚠️ Data Notice:</strong> All towers are co-located at identical coordinates (${m.min_distance_m}m separation). Each transceiver mutually conflicts under circular coverage.`;
+                statusMsg.style.color = "var(--accent-amber)";
+            } else {
+                statusMsg.textContent = `Graph built: ${data.nodes.length} vertices, ${data.edges.length} conflict edges (overlap: d <= r1 + r2).`;
+                statusMsg.style.color = "var(--accent-emerald)";
+            }
         }
     } catch (err) {
         console.error("Graph build error:", err);
@@ -2048,8 +2058,10 @@ function renderGraphExplorer() {
             ctx.lineWidth = 0.5;
             ctx.strokeStyle = "rgba(239, 68, 68, 0.08)";
         } else {
-            ctx.lineWidth = 1;
-            ctx.strokeStyle = "rgba(239, 68, 68, 0.22)";
+            const edgeCount = state.interferenceEdges.length;
+            const alpha = edgeCount > 300 ? Math.max(0.04, Number((25.0 / edgeCount).toFixed(3))) : 0.22;
+            ctx.lineWidth = edgeCount > 300 ? 0.6 : 1;
+            ctx.strokeStyle = `rgba(239, 68, 68, ${alpha})`;
         }
         ctx.stroke();
     });
