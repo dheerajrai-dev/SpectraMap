@@ -49,14 +49,32 @@ def get_graph_metrics(graph: nx.Graph) -> dict[str, Any]:
     """
     node_count = graph.number_of_nodes()
     edge_count = graph.number_of_edges()
+    max_deg = max((deg for _, deg in graph.degree()), default=0)
+
+    # Lower bound via maximum clique approximation: omega(G) <= chi(G)
+    clique_lb = 0
+    if node_count > 0:
+        if edge_count == 0:
+            clique_lb = 1
+        else:
+            try:
+                approx_clique = nx.approximation.max_clique(graph)
+                clique_lb = len(approx_clique)
+            except Exception:
+                clique_lb = 1
+
+    # Brooks' theorem upper bound: chi(G) <= Delta(G) + 1
+    brooks_ub = (max_deg + 1) if node_count > 0 else 0
 
     return {
         "node_count": node_count,
         "edge_count": edge_count,
         "density": round(nx.density(graph), 4) if node_count > 1 else 0.0,
         "connected_components": nx.number_connected_components(graph) if node_count > 0 else 0,
-        "max_degree": max((deg for _, deg in graph.degree()), default=0),
+        "max_degree": max_deg,
         "avg_degree": round(sum(deg for _, deg in graph.degree()) / node_count, 2) if node_count > 0 else 0.0,
+        "clique_lower_bound": clique_lb,
+        "brooks_upper_bound": brooks_ub,
     }
 
 

@@ -251,6 +251,48 @@
                             </ul>
                         </div>
                     </div>
+
+                    <div class="inspector-field-group" id="insp-allocation-group">
+                        <span class="field-title">Channel Allocation &amp; Explainability</span>
+                        <div class="field-grid">
+                            <div class="field-item">
+                                <span class="field-label">Saturation Degree (sat)</span>
+                                <span class="field-val" id="insp-sat-degree">—</span>
+                            </div>
+                            <div class="field-item">
+                                <span class="field-label">Interference Neighbors</span>
+                                <span class="field-val" id="insp-node-degree">—</span>
+                            </div>
+                        </div>
+
+                        <div class="channel-explain-section">
+                            <span class="field-label">Neighbor Occupied Channels (Blocked):</span>
+                            <div id="insp-blocked-channels" class="blocked-chips-container">
+                                <span class="chip-empty">Run optimization to inspect</span>
+                            </div>
+                        </div>
+
+                        <div class="rationale-card">
+                            <div class="rationale-header">
+                                <span class="rationale-tag">Step-by-Step Rationale</span>
+                            </div>
+                            <p id="insp-rationale-text" class="rationale-text">
+                                Select a tower and run frequency optimization to inspect channel allocation rationale.
+                            </p>
+                        </div>
+
+                        <div class="cellular-reality-card">
+                            <div class="reality-header">
+                                <span class="reality-icon">📡</span>
+                                <span class="reality-title">Cellular Engineering Reality</span>
+                            </div>
+                            <p class="reality-text">
+                                SpectraMap uses an idealized binary disk overlap model (d &le; r<sub>u</sub> + r<sub>v</sub>). 
+                                Operational cellular networks use 3-sector directional antennas (120° azimuths), 
+                                continuous SINR thresholds, and Fractional Frequency Reuse (FFR).
+                            </p>
+                        </div>
+                    </div>
                 </div>
             </aside>
 
@@ -294,6 +336,9 @@
                             <span class="algo-metric" id="res-exact-colors">—</span>
                             <span class="algo-valid" id="res-exact-valid">—</span>
                         </div>
+                        <button id="btn-open-compare" class="btn btn-secondary btn-sm btn-compare" title="Open comprehensive side-by-side solver benchmark and theoretical analysis">
+                            <span class="btn-icon">⚖️</span> Compare Solvers
+                        </button>
                     </div>
 
                     <!-- Legal Attribution -->
@@ -317,45 +362,174 @@
 
     <!-- Educational "How It Works" Modal -->
     <div id="guide-modal" class="modal-backdrop" aria-hidden="true">
-        <div class="modal-dialog" role="dialog" aria-labelledby="guide-title">
+        <div class="modal-dialog modal-dialog-lg" role="dialog" aria-labelledby="guide-title">
             <div class="modal-header">
-                <h2 id="guide-title">How SpectraMap Works</h2>
+                <div class="modal-header-text">
+                    <h2 id="guide-title">How SpectraMap Works</h2>
+                    <span class="modal-subtitle">Geospatial Frequency Optimization &amp; Graph Coloring Theory</span>
+                </div>
                 <button id="btn-close-guide" class="btn-icon-only" aria-label="Close modal">✕</button>
             </div>
             <div class="modal-body">
+                <!-- Section 1 -->
                 <section class="guide-section">
-                    <h3>1. The Physical Cellular Problem</h3>
-                    <p>Cellular networks must share a scarce slice of radio spectrum. If two nearby towers transmit on the exact same frequency, their radio signals collide, causing dropped calls and data corruption.</p>
-                </section>
-                <section class="guide-section">
-                    <h3>2. The Discrete Mathematical Model</h3>
-                    <div class="guide-concept-grid">
-                        <div class="concept-box">
-                            <strong>Vertex (Node)</strong>
-                            <span>A cell tower transceiver with geographic coordinates (lat<sub>i</sub>, lon<sub>i</sub>) and coverage radius r<sub>i</sub>.</span>
+                    <h3>1. The Radio Spectrum Scarcity Problem</h3>
+                    <p>
+                        Wireless network operators purchase expensive radio spectrum at national auctions. 
+                        Radio frequency (RF) channels must be reused across geographic space because spectrum is strictly finite. 
+                        However, if two nearby transmitters operate on the exact same frequency channel, their electromagnetic waves 
+                        destructively collide — causing dropped calls, packet loss, and severe co-channel interference.
+                    </p>
+                    <div class="guide-diagram-box">
+                        <div class="diagram-scenario">
+                            <span class="scenario-bad">✖ Co-Channel Collision:</span>
+                            <span class="scenario-desc">Tower A (Channel f1) and Tower B (Channel f1) overlap &rarr; destructive radio interference.</span>
                         </div>
-                        <div class="concept-box">
-                            <strong>Interference Edge</strong>
-                            <span>An undirected link between two towers whose transmission ranges overlap: d(u, v) &le; r<sub>u</sub> + r<sub>v</sub>.</span>
+                        <div class="diagram-scenario">
+                            <span class="scenario-good">✔ Proper Frequency Separation:</span>
+                            <span class="scenario-desc">Tower A (Channel f1) and Tower B (Channel f2) overlap &rarr; zero co-channel interference!</span>
                         </div>
-                        <div class="concept-box">
-                            <strong>Color (Channel)</strong>
-                            <span>An abstract frequency group (f<sub>1</sub>, f<sub>2</sub>, &hellip;). Connected nodes cannot share the same color.</span>
-                        </div>
-                        <div class="concept-box">
-                            <strong>Validation</strong>
-                            <span>An independent checker verifying zero adjacent conflicts: &forall; (u, v) &isin; E, c(u) &ne; c(v).</span>
+                        <div class="diagram-scenario">
+                            <span class="scenario-good">✔ Spatial Frequency Reuse:</span>
+                            <span class="scenario-desc">Tower A (f1) and Tower C (f1) are separated by &gt; r<sub>A</sub> + r<sub>C</sub> &rarr; safe to reuse f1.</span>
                         </div>
                     </div>
                 </section>
+
+                <!-- Section 2 -->
                 <section class="guide-section">
-                    <h3>3. Welsh-Powell vs DSATUR</h3>
-                    <p>Both are greedy graph coloring heuristics trying to approximate the chromatic number &chi;(G) with zero conflicts:</p>
-                    <ul>
-                        <li><strong>Welsh-Powell:</strong> Statically sorts vertices by descending degree (highest connectivity first) and assigns colors greedily.</li>
-                        <li><strong>DSATUR (Degree of Saturation):</strong> Dynamically chooses the uncolored vertex with the highest number of <em>distinct colors already assigned to its neighbors</em>, breaking ties with vertex degree. Often uses fewer colors on real-world cluster topologies!</li>
-                    </ul>
+                    <h3>2. The Discrete Graph Theory Mapping</h3>
+                    <p>
+                        SpectraMap maps the physical geospatial layout directly into an undirected conflict graph <em>G = (V, E)</em>:
+                    </p>
+                    <div class="guide-concept-grid">
+                        <div class="concept-box">
+                            <strong>Transceiver &rarr; Vertex (v &isin; V)</strong>
+                            <span>Each cellular transmitter base station with coordinates (&phi;<sub>i</sub>, &lambda;<sub>i</sub>) and estimated coverage radius r<sub>i</sub>.</span>
+                        </div>
+                        <div class="concept-box">
+                            <strong>Overlap &rarr; Edge ((u, v) &isin; E)</strong>
+                            <span>An undirected conflict edge exists whenever geodesic distance d(u, v) &le; r<sub>u</sub> + r<sub>v</sub> (coverage boundaries overlap).</span>
+                        </div>
+                        <div class="concept-box">
+                            <strong>Frequency Group &rarr; Color (c(v))</strong>
+                            <span>An assigned discrete frequency channel f<sub>1</sub>, f<sub>2</sub>, &hellip;, f<sub>k</sub>. Adjacent nodes must receive different colors.</span>
+                        </div>
+                        <div class="concept-box">
+                            <strong>Minimum Spectrum &rarr; Chromatic Number &chi;(G)</strong>
+                            <span>The theoretical minimum number of non-interfering channels required to color graph G without any adjacent collisions.</span>
+                        </div>
+                    </div>
                 </section>
+
+                <!-- Section 3 -->
+                <section class="guide-section">
+                    <h3>3. Solver Mechanics &amp; Theoretical Bounds</h3>
+                    <p>
+                        Determining the exact chromatic number &chi;(G) is an NP-hard problem. SpectraMap evaluates three complementary methods:
+                    </p>
+                    <div class="guide-solver-cards">
+                        <div class="solver-card">
+                            <div class="solver-card-header">
+                                <span class="solver-title">Welsh–Powell (1967)</span>
+                                <span class="solver-badge badge-heuristic">Static Greedy</span>
+                            </div>
+                            <p class="solver-desc">
+                                Statically sorts vertices by descending graph degree &Delta;(v) and colors maximal independent sets in sequential passes. 
+                                Extremely fast (<em>O(V log V + E)</em>), but can be trapped into using unnecessary extra colors because it ignores dynamic neighbor saturation.
+                            </p>
+                        </div>
+
+                        <div class="solver-card">
+                            <div class="solver-card-header">
+                                <span class="solver-title">DSatur (Br&eacute;laz, 1979)</span>
+                                <span class="solver-badge badge-heuristic">Dynamic Saturation</span>
+                            </div>
+                            <p class="solver-desc">
+                                Dynamically tracks the saturation degree <strong>sat(v)</strong> — the number of <em>distinct colors already assigned to neighbors</em>. 
+                                Always colors the most constrained uncolored vertex first, breaking ties with uncolored degree. Proven to achieve optimal or near-optimal colorings on cellular spatial topologies.
+                            </p>
+                        </div>
+
+                        <div class="solver-card">
+                            <div class="solver-card-header">
+                                <span class="solver-title">Exact DSatur Branch-and-Bound</span>
+                                <span class="solver-badge badge-optimal">Exact Minimum (&chi;(G))</span>
+                            </div>
+                            <p class="solver-desc">
+                                Pre-colors a maximum clique &omega;(G) at the root to break color permutation symmetry (eliminating k! redundant subtrees). 
+                                Explores the state tree with DSatur vertex ordering and dynamic upper-bound pruning. Bounded to N &le; 25 with a 500 ms monotonic deadline clock.
+                            </p>
+                        </div>
+                    </div>
+
+                    <div class="guide-bounds-box">
+                        <strong>Theoretical Bounds Guarantees:</strong>
+                        <ul>
+                            <li><strong>Clique Lower Bound:</strong> &chi;(G) &ge; &omega;(G). Because all vertices in a complete subgraph (clique) pairwise overlap, no two can share a frequency.</li>
+                            <li><strong>Brooks' Theorem Upper Bound:</strong> &chi;(G) &le; &Delta;(G) + 1. For any connected graph that is neither a complete graph nor an odd cycle, &chi;(G) &le; &Delta;(G).</li>
+                        </ul>
+                    </div>
+                </section>
+
+                <!-- Section 4 -->
+                <section class="guide-section">
+                    <h3>4. Educational Model vs Real-World Cellular Engineering</h3>
+                    <p>
+                        While SpectraMap provides an accurate implementation of graph coloring theory, operational cellular networks (4G LTE, 5G NR) operate under continuous physical radio propagation constraints:
+                    </p>
+                    <div class="comparison-table-wrapper">
+                        <table class="guide-matrix-table">
+                            <thead>
+                                <tr>
+                                    <th>Dimension</th>
+                                    <th>SpectraMap Discrete Model</th>
+                                    <th>Real Cellular Network (4G/5G)</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td><strong>Coverage Geometry</strong></td>
+                                    <td>2D circular disks with radius r<sub>i</sub>.</td>
+                                    <td>3-sector directional antennas (120° azimuths) with electrical downtilt and irregular RF shadow fading.</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Interference Boundary</strong></td>
+                                    <td>Binary collision (overlap = edge; no overlap = no edge).</td>
+                                    <td>Continuous Signal-to-Interference-plus-Noise Ratio (SINR) and path loss models (Hata, COST-231, 3GPP 38.901).</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Frequency Allocation</strong></td>
+                                    <td>Discrete hard channel groups (f<sub>1</sub>, f<sub>2</sub>, &hellip;).</td>
+                                    <td>OFDMA subcarrier resource blocks, dynamic Fractional Frequency Reuse (FFR), and carrier aggregation.</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Power &amp; Optimization</strong></td>
+                                    <td>Static coverage radius.</td>
+                                    <td>Dynamic closed-loop transmit power control (TPC) and Coordinated Multi-Point (CoMP) beamforming.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            </div>
+        </div>
+    </div>
+
+    <!-- Interactive Side-by-Side Algorithm Comparison Modal -->
+    <div id="compare-modal" class="modal-backdrop" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-lg" role="dialog" aria-labelledby="compare-title">
+            <div class="modal-header">
+                <div class="modal-header-text">
+                    <h2 id="compare-title">Algorithm Comparison &amp; Theoretical Analysis</h2>
+                    <span class="modal-subtitle">Side-by-side benchmark of DSatur, Welsh-Powell, and Exact Solver</span>
+                </div>
+                <button id="btn-close-compare" class="btn-icon-only" aria-label="Close modal">✕</button>
+            </div>
+            <div class="modal-body" id="compare-modal-body">
+                <div class="compare-placeholder">
+                    <span>Run frequency optimization to populate the side-by-side algorithm comparison matrix.</span>
+                </div>
             </div>
         </div>
     </div>

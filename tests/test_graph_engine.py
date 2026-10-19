@@ -1,4 +1,5 @@
 import pytest
+import networkx as nx
 from graph_engine import (
     build_interference_graph,
     get_graph_metrics,
@@ -506,5 +507,34 @@ def test_cellular_spatial_topologies():
     assert g_disjoint.number_of_edges() == 0
     exact_disjoint = color_exact_dsatur_bnb(g_disjoint)
     assert exact_disjoint["color_count"] == 1
+
+
+def test_graph_metrics_theoretical_bounds():
+    # 1. Empty graph
+    g_empty = nx.Graph()
+    m_empty = get_graph_metrics(g_empty)
+    assert m_empty["clique_lower_bound"] == 0
+    assert m_empty["brooks_upper_bound"] == 0
+
+    # 2. Complete Graph K4: clique_lb = 4, max_degree = 3 -> brooks_ub = 4
+    g_k4 = nx.complete_graph(4)
+    m_k4 = get_graph_metrics(g_k4)
+    assert m_k4["clique_lower_bound"] == 4
+    assert m_k4["max_degree"] == 3
+    assert m_k4["brooks_upper_bound"] == 4
+
+    # 3. Path graph P5: 0-1-2-3-4 -> max clique is 2 (any single edge), max_degree is 2 -> brooks_ub = 3
+    g_p5 = nx.path_graph(5)
+    m_p5 = get_graph_metrics(g_p5)
+    assert m_p5["clique_lower_bound"] == 2
+    assert m_p5["max_degree"] == 2
+    assert m_p5["brooks_upper_bound"] == 3
+
+    # 4. Independent set (isolated vertices)
+    g_iso = nx.empty_graph(5)
+    m_iso = get_graph_metrics(g_iso)
+    assert m_iso["clique_lower_bound"] == 1
+    assert m_iso["brooks_upper_bound"] == 1
+
 
 

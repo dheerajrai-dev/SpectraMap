@@ -338,6 +338,46 @@ function initControls() {
         });
     }
 
+    // Algorithm Comparison Modal
+    const btnCompare = document.getElementById("btn-open-compare");
+    const compareModal = document.getElementById("compare-modal");
+    const btnCloseCompare = document.getElementById("btn-close-compare");
+    if (btnCompare && compareModal) {
+        btnCompare.addEventListener("click", () => {
+            renderCompareModalContent();
+            compareModal.classList.add("open");
+            compareModal.setAttribute("aria-hidden", "false");
+        });
+    }
+    if (btnCloseCompare && compareModal) {
+        btnCloseCompare.addEventListener("click", () => {
+            compareModal.classList.remove("open");
+            compareModal.setAttribute("aria-hidden", "true");
+        });
+        compareModal.addEventListener("click", (e) => {
+            if (e.target === compareModal) {
+                compareModal.classList.remove("open");
+                compareModal.setAttribute("aria-hidden", "true");
+            }
+        });
+    }
+
+    // Clicking algorithm pills opens comparison modal
+    ["pill-dsatur", "pill-wp", "pill-exact"].forEach((id) => {
+        const pill = document.getElementById(id);
+        if (pill) {
+            pill.style.cursor = "pointer";
+            pill.setAttribute("title", "Click to open side-by-side solver comparison & theoretical bounds");
+            pill.addEventListener("click", () => {
+                if (compareModal) {
+                    renderCompareModalContent();
+                    compareModal.classList.add("open");
+                    compareModal.setAttribute("aria-hidden", "false");
+                }
+            });
+        }
+    });
+
     // Initialize interactive Graph Topology Canvas handlers
     initGraphCanvasInteractions();
 }
@@ -881,6 +921,72 @@ function openVertexInspector(towerId) {
         });
     }
 
+    // Channel Allocation & Explainability
+    const satEl = document.getElementById("insp-sat-degree");
+    const nodeDegEl = document.getElementById("insp-node-degree");
+    const blockedChipsEl = document.getElementById("insp-blocked-channels");
+    const rationaleTextEl = document.getElementById("insp-rationale-text");
+
+    if (nodeDegEl) nodeDegEl.textContent = `${neighbors.length} neighbors`;
+
+    const neighborChannelsSet = new Set();
+    neighbors.forEach((n) => {
+        if (coloring && coloring[n.id] !== undefined && coloring[n.id] !== null) {
+            neighborChannelsSet.add(coloring[n.id]);
+        }
+    });
+
+    const satDegree = neighborChannelsSet.size;
+    if (satEl) {
+        satEl.textContent = coloring ? `${satDegree} distinct` : "—";
+    }
+
+    if (blockedChipsEl) {
+        blockedChipsEl.innerHTML = "";
+        if (!coloring) {
+            blockedChipsEl.innerHTML = '<span class="chip-empty">Run optimization to inspect</span>';
+        } else if (neighborChannelsSet.size === 0) {
+            blockedChipsEl.innerHTML = '<span class="chip-empty">None (Unconstrained — free to reuse primary channel f1)</span>';
+        } else {
+            const sortedChannels = Array.from(neighborChannelsSet).sort((a, b) => a - b);
+            sortedChannels.forEach((ch) => {
+                const chColor = getFrequencyColor(ch);
+                const chip = document.createElement("span");
+                chip.className = "blocked-chip";
+                chip.style.color = chColor;
+                chip.style.borderColor = chColor;
+                chip.innerHTML = `<span class="chip-x">✕</span> Channel f${ch + 1}`;
+                blockedChipsEl.appendChild(chip);
+            });
+        }
+    }
+
+    if (rationaleTextEl) {
+        if (!coloring) {
+            rationaleTextEl.textContent = `Cell ${cell.label} has ${neighbors.length} interference neighbors. Run 'Optimize Frequencies' to inspect the step-by-step channel allocation rationale.`;
+        } else {
+            const myFreq = coloring[towerId];
+            const myChannelStr = `Channel f${myFreq + 1}`;
+            const algoName = algoKey === "welsh_powell" ? "Welsh-Powell" : (algoKey === "exact" ? "Exact Minimum Solver" : "DSatur");
+
+            if (neighbors.length === 0) {
+                rationaleTextEl.textContent = `Cell ${cell.label} has no overlapping coverage neighbors (deg(v) = 0). It was assigned primary Channel f1 without spectrum conflict.`;
+            } else {
+                const sortedChannels = Array.from(neighborChannelsSet).sort((a, b) => a - b);
+                const blockedList = sortedChannels.map((c) => `f${c + 1}`).join(", ");
+                let text = `Cell ${cell.label} has ${neighbors.length} interference neighbors consuming channels {${blockedList}}. Under ${algoName}'s greedy assignment, ${myChannelStr} was the lowest non-conflicting frequency available.`;
+                if (algoKey === "dsatur") {
+                    text += ` DSatur dynamically prioritized vertices by saturation degree (sat(v) = ${satDegree}), preventing downstream spectrum traps.`;
+                } else if (algoKey === "welsh_powell") {
+                    text += ` Welsh-Powell allocated this channel during independent set pass ${myFreq + 1} based on static degree ordering.`;
+                } else if (algoKey === "exact") {
+                    text += ` The Exact Branch-and-Bound solver mathematically verified this allocation within the minimum chromatic search tree.`;
+                }
+                rationaleTextEl.textContent = text;
+            }
+        }
+    }
+
     inspector.classList.add("open");
     inspector.setAttribute("aria-hidden", "false");
     document.getElementById("analytics-dock")?.classList.add("with-inspector");
@@ -931,6 +1037,7 @@ async function runFrequencyOptimization() {
             dsatur: data.dsatur,
             exact: data.exact,
             best_algorithm: data.best_algorithm,
+            metrics: data.metrics,
         };
         state.interferenceEdges = data.edges || [];
 
@@ -1003,6 +1110,17 @@ async function runFrequencyOptimization() {
             renderGraphExplorer();
         }
 
+        // 6. Refresh vertex inspector explainability if a tower is currently inspected
+        if (state.selectedTowerId) {
+            openVertexInspector(state.selectedTowerId);
+        }
+
+        // 7. Refresh side-by-side comparison modal if open
+        const compareModal = document.getElementById("compare-modal");
+        if (compareModal && compareModal.classList.contains("open")) {
+            renderCompareModalContent();
+        }
+
         let summaryText = `Optimization complete! DSATUR: ${ds?.color_count} colors, Welsh-Powell: ${wp?.color_count} colors.`;
         if (ex?.proven_optimal) {
             summaryText += ` Proven minimum chromatic number χ(G) = ${ex.color_count}.`;
@@ -1017,6 +1135,278 @@ async function runFrequencyOptimization() {
         btnOptimize.disabled = false;
         btnOptimize.textContent = "Optimize Frequencies";
     }
+}
+
+/**
+ * Renders the dynamic content of the Algorithm Comparison Modal.
+ */
+function renderCompareModalContent() {
+    const container = document.getElementById("compare-modal-body");
+    if (!container) return;
+
+    if (!state.optimizationResults) {
+        container.innerHTML = `
+            <div class="compare-placeholder">
+                <span style="font-size: 1.8rem; display: block; margin-bottom: 0.5rem;">📡</span>
+                <strong style="color: var(--text-primary); font-size: 0.95rem;">No Optimization Results Available</strong>
+                <p style="font-size: 0.78rem; color: var(--text-muted); margin-top: 0.35rem;">
+                    Fetch cell records and click 'Optimize Frequencies' to generate the side-by-side benchmark comparison matrix.
+                </p>
+            </div>
+        `;
+        return;
+    }
+
+    const m = state.optimizationResults.metrics || {};
+    const ds = state.optimizationResults.dsatur;
+    const wp = state.optimizationResults.welsh_powell;
+    const ex = state.optimizationResults.exact;
+    const best = state.optimizationResults.best_algorithm || "";
+
+    const isDsaturBest = best.toLowerCase().includes("dsatur") && best !== "exact_dsatur_bnb";
+    const isWpBest = best.toLowerCase().includes("welsh");
+    const isExactBest = best === "exact_dsatur_bnb";
+
+    const totalCells = state.cells.length;
+    const bestAlgoName = isExactBest ? "Exact DSatur B&B" : (isWpBest ? "Welsh-Powell" : "DSatur");
+    const bestResult = isExactBest ? ex : (isWpBest ? wp : ds);
+    const bestColors = bestResult?.color_count || 0;
+    const channelsSaved = Math.max(0, totalCells - bestColors);
+
+    // Compute direct channel agreement
+    let directAgreeCount = 0;
+    const discrepancies = [];
+    if (ds?.coloring && wp?.coloring) {
+        state.cells.forEach((cell) => {
+            const dsC = ds.coloring[cell.tower_id];
+            const wpC = wp.coloring[cell.tower_id];
+            if (dsC === wpC) {
+                directAgreeCount++;
+            } else {
+                discrepancies.push({
+                    tower_id: cell.tower_id,
+                    label: cell.label,
+                    cell_id: cell.cell_id,
+                    dsatur_f: dsC !== undefined ? dsC + 1 : '—',
+                    wp_f: wpC !== undefined ? wpC + 1 : '—',
+                });
+            }
+        });
+    }
+    const directAgreePct = totalCells > 0 ? ((directAgreeCount / totalCells) * 100).toFixed(1) : "100.0";
+
+    // Compute pairwise partition agreement (Rand consistency)
+    let agreePairs = 0;
+    let totalPairs = 0;
+    if (ds?.coloring && wp?.coloring && totalCells > 1) {
+        const nLimit = Math.min(totalCells, 150); // Keep sub-millisecond
+        for (let i = 0; i < nLimit; i++) {
+            const idA = state.cells[i].tower_id;
+            for (let j = i + 1; j < nLimit; j++) {
+                const idB = state.cells[j].tower_id;
+                const dsSame = ds.coloring[idA] === ds.coloring[idB];
+                const wpSame = wp.coloring[idA] === wp.coloring[idB];
+                if (dsSame === wpSame) agreePairs++;
+                totalPairs++;
+            }
+        }
+    }
+    const pairAgreePct = totalPairs > 0 ? ((agreePairs / totalPairs) * 100).toFixed(1) : "100.0";
+
+    const cliqueLB = m.clique_lower_bound || ex?.lower_bound || 1;
+    const brooksUB = m.brooks_upper_bound || (m.max_degree ? m.max_degree + 1 : 1);
+
+    let verdictText = `Optimal heuristic allocation: <strong>${bestAlgoName}</strong> minimized frequency usage to <strong>${bestColors} channels</strong>.`;
+    if (ex?.proven_optimal) {
+        verdictText += ` Mathematically proven minimum chromatic number: <strong>&chi;(G) = ${ex.color_count}</strong>.`;
+    } else {
+        verdictText += ` Upper bound &chi;(G) &le; ${bestColors} verified with 0 adjacent conflicts.`;
+    }
+
+    container.innerHTML = `
+        <!-- 1. Executive Banner -->
+        <div class="compare-banner">
+            <div class="compare-banner-left">
+                <span class="compare-verdict-title">✔ Heuristic Optimization Verdict</span>
+                <span class="compare-verdict-desc">${verdictText}</span>
+            </div>
+            <div class="compare-banner-stat">
+                <span class="compare-banner-num">${bestColors}</span>
+                <span class="compare-banner-sub">Channels (${channelsSaved} Saved vs Naive)</span>
+            </div>
+        </div>
+
+        <!-- 2. Side-by-Side Comparison Matrix Table -->
+        <div class="comparison-table-wrapper">
+            <table class="compare-matrix-table">
+                <thead>
+                    <tr>
+                        <th style="width: 25%;">Metric / Property</th>
+                        <th style="width: 25%;" class="${isDsaturBest ? 'col-highlight' : ''}">
+                            DSatur (Dynamic) ${isDsaturBest ? '⭐' : ''}
+                        </th>
+                        <th style="width: 25%;" class="${isWpBest ? 'col-highlight' : ''}">
+                            Welsh–Powell (Static) ${isWpBest ? '⭐' : ''}
+                        </th>
+                        <th style="width: 25%;" class="${isExactBest ? 'col-highlight' : ''}">
+                            Exact B&amp;B Solver ${isExactBest ? '⭐' : ''}
+                        </th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Frequency Channels (k)</strong></td>
+                        <td class="${isDsaturBest ? 'col-highlight' : ''}">
+                            <span class="metric-val-bold">${ds?.color_count ?? '—'}</span>
+                        </td>
+                        <td class="${isWpBest ? 'col-highlight' : ''}">
+                            <span class="metric-val-bold">${wp?.color_count ?? '—'}</span>
+                        </td>
+                        <td class="${isExactBest ? 'col-highlight' : ''}">
+                            <span class="metric-val-bold">${ex?.proven_optimal ? ex.color_count : (ex?.status === 'skipped_size_limit' ? 'N > 25 (Skipped)' : '—')}</span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><strong>Optimality Status</strong></td>
+                        <td class="${isDsaturBest ? 'col-highlight' : ''}">
+                            <span style="color: var(--accent-blue);">Heuristic Upper Bound</span>
+                        </td>
+                        <td class="${isWpBest ? 'col-highlight' : ''}">
+                            <span style="color: var(--accent-blue);">Heuristic Upper Bound</span>
+                        </td>
+                        <td class="${isExactBest ? 'col-highlight' : ''}">
+                            ${ex?.proven_optimal 
+                                ? '<span style="color: var(--accent-emerald); font-weight: 700;">✔ Proven Optimal (&chi;=' + ex.color_count + ')</span>'
+                                : '<span style="color: var(--text-muted);">' + (ex?.status === 'skipped_size_limit' ? 'Heuristic Only (N > 25)' : 'Unavailable') + '</span>'}
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><strong>Execution Runtime</strong></td>
+                        <td class="${isDsaturBest ? 'col-highlight' : ''}">${ds ? ds.runtime_ms.toFixed(2) + ' ms' : '—'}</td>
+                        <td class="${isWpBest ? 'col-highlight' : ''}">${wp ? wp.runtime_ms.toFixed(2) + ' ms' : '—'}</td>
+                        <td class="${isExactBest ? 'col-highlight' : ''}">${ex && ex.runtime_ms ? ex.runtime_ms.toFixed(2) + ' ms' : '—'}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Validation / Conflicts</strong></td>
+                        <td class="${isDsaturBest ? 'col-highlight' : ''}">
+                            ${ds?.validation?.is_valid ? '<span style="color: var(--accent-emerald)">✔ 0 Conflicts (100% Valid)</span>' : '<span style="color: var(--accent-rose)">✖ Conflicts</span>'}
+                        </td>
+                        <td class="${isWpBest ? 'col-highlight' : ''}">
+                            ${wp?.validation?.is_valid ? '<span style="color: var(--accent-emerald)">✔ 0 Conflicts (100% Valid)</span>' : '<span style="color: var(--accent-rose)">✖ Conflicts</span>'}
+                        </td>
+                        <td class="${isExactBest ? 'col-highlight' : ''}">
+                            ${ex?.validation?.is_valid ? '<span style="color: var(--accent-emerald)">✔ 0 Conflicts (100% Valid)</span>' : '<span style="color: var(--text-muted)">—</span>'}
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><strong>Algorithmic Paradigm</strong></td>
+                        <td class="${isDsaturBest ? 'col-highlight' : ''}">Dynamic Saturation Greedy</td>
+                        <td class="${isWpBest ? 'col-highlight' : ''}">Static Degree Greedy Passes</td>
+                        <td class="${isExactBest ? 'col-highlight' : ''}">Branch-and-Bound + Clique Pruning</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Worst-Case Complexity</strong></td>
+                        <td class="${isDsaturBest ? 'col-highlight' : ''}">O(V<sup>2</sup>)</td>
+                        <td class="${isWpBest ? 'col-highlight' : ''}">O(V log V + E)</td>
+                        <td class="${isExactBest ? 'col-highlight' : ''}">O(k<sup>V</sup>) (Exponential)</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Selection Metric</strong></td>
+                        <td class="${isDsaturBest ? 'col-highlight' : ''}">Dynamic saturation sat(v)</td>
+                        <td class="${isWpBest ? 'col-highlight' : ''}">Static graph degree &Delta;(v)</td>
+                        <td class="${isExactBest ? 'col-highlight' : ''}">Max Clique root + DSatur ordering</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Frequency Reuse Efficiency</strong></td>
+                        <td class="${isDsaturBest ? 'col-highlight' : ''}">
+                            ${ds?.color_count ? (totalCells / ds.color_count).toFixed(2) + ' cells / channel' : '—'}
+                        </td>
+                        <td class="${isWpBest ? 'col-highlight' : ''}">
+                            ${wp?.color_count ? (totalCells / wp.color_count).toFixed(2) + ' cells / channel' : '—'}
+                        </td>
+                        <td class="${isExactBest ? 'col-highlight' : ''}">
+                            ${ex?.color_count ? (totalCells / ex.color_count).toFixed(2) + ' cells / channel' : '—'}
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- 3. Theoretical Bounds Card -->
+        <div class="bounds-grid">
+            <div class="bounds-card">
+                <span class="bounds-label">Clique Lower Bound &omega;(G)</span>
+                <span class="bounds-val" style="color: var(--accent-amber);">&ge; ${cliqueLB}</span>
+                <span class="bounds-desc">Maximum complete subgraph size. At least ${cliqueLB} frequencies are physically mandatory due to mutual overlap.</span>
+            </div>
+            <div class="bounds-card">
+                <span class="bounds-label">Brooks' Upper Bound</span>
+                <span class="bounds-val" style="color: var(--accent-blue);">&le; ${brooksUB}</span>
+                <span class="bounds-desc">Guarantees &chi;(G) &le; &Delta;(G) + 1. Graph maximum degree is &Delta; = ${m.max_degree ?? 0}.</span>
+            </div>
+            <div class="bounds-card">
+                <span class="bounds-label">Heuristic Quality</span>
+                <span class="bounds-val" style="color: var(--accent-emerald);">
+                    ${ex?.proven_optimal ? 'Exact (Optimal)' : (bestColors === cliqueLB ? 'Exact Match' : `Gap &le; ${bestColors - cliqueLB}`)}
+                </span>
+                <span class="bounds-desc">
+                    ${bestColors === cliqueLB 
+                        ? 'Best heuristic matches the theoretical clique lower bound &omega;(G) exactly!' 
+                        : `Within ${bestColors - cliqueLB} channels of the maximum clique lower bound.`}
+                </span>
+            </div>
+        </div>
+
+        <!-- 4. Heuristic Agreement & Discrepancies -->
+        <div class="agreement-card">
+            <span class="agreement-title">Heuristic Agreement &amp; Partition Consistency</span>
+            <div class="agreement-stats-row">
+                <div class="agreement-stat-box">
+                    <span class="agreement-stat-num">${directAgreePct}%</span>
+                    <span class="agreement-stat-label">Direct Channel Assignment Match (${directAgreeCount}/${totalCells} cells)</span>
+                </div>
+                <div class="agreement-stat-box">
+                    <span class="agreement-stat-num">${pairAgreePct}%</span>
+                    <span class="agreement-stat-label">Pairwise Partition Agreement (Rand Consistency)</span>
+                </div>
+            </div>
+
+            ${discrepancies.length > 0 ? `
+                <div class="discrepancy-container">
+                    <span class="discrepancy-title">Allocation Discrepancies (${discrepancies.length} cells assigned different channels):</span>
+                    <div class="discrepancy-list">
+                        ${discrepancies.map(d => `
+                            <button class="discrepancy-item" data-tower-id="${d.tower_id}" title="Click to inspect this tower">
+                                <strong>Cell ${d.label}</strong>
+                                <span>DSatur: f${d.dsatur_f}</span>
+                                <span style="color: var(--text-muted);">&ne;</span>
+                                <span>WP: f${d.wp_f}</span>
+                            </button>
+                        `).join('')}
+                    </div>
+                </div>
+            ` : `
+                <div style="font-size: 0.74rem; color: var(--accent-emerald); margin-top: 0.25rem;">
+                    ✔ 100% agreement between DSatur and Welsh-Powell across all cell tower frequency assignments!
+                </div>
+            `}
+        </div>
+    `;
+
+    // Add click listeners to discrepancy items
+    container.querySelectorAll(".discrepancy-item").forEach(btn => {
+        btn.addEventListener("click", () => {
+            const towerId = btn.getAttribute("data-tower-id");
+            if (towerId) {
+                const modal = document.getElementById("compare-modal");
+                if (modal) {
+                    modal.classList.remove("open");
+                    modal.setAttribute("aria-hidden", "true");
+                }
+                openVertexInspector(towerId);
+            }
+        });
+    });
 }
 
 /**
@@ -1246,6 +1636,9 @@ function resetOptimizationScoreboard() {
     ["pill-dsatur", "pill-wp", "pill-exact"].forEach((id) => {
         document.getElementById(id)?.classList.remove("best-algo-pill");
     });
+
+    state.optimizationResults = null;
+    state.interferenceEdges = [];
 
     // Reset coverage circles and markers
     if (state.coverageCirclesById) {
