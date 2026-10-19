@@ -152,9 +152,35 @@
                 </div>
 
                 <div class="dock-section">
-                    <button id="btn-fetch" class="btn btn-primary btn-block">
-                        <span class="btn-icon">📡</span> Fetch Cell Records
-                    </button>
+                    <div class="slider-header">
+                        <label for="override-slider" class="section-label">Coverage Radius Override</label>
+                        <span class="slider-value"><span id="override-label">Data Default</span></span>
+                    </div>
+                    <input
+                        type="range"
+                        id="override-slider"
+                        min="0"
+                        max="2000"
+                        step="50"
+                        value="0"
+                    />
+                    <div class="slider-ticks">
+                        <span>Default</span>
+                        <span>1000m</span>
+                        <span>2000m</span>
+                    </div>
+                    <small class="dock-hint" style="display:block; font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;">0 = use observed cell ranges; &gt;0 = uniform radius sensitivity</small>
+                </div>
+
+                <div class="dock-section">
+                    <div style="display: flex; gap: 8px;">
+                        <button id="btn-fetch" class="btn btn-primary" style="flex: 1;">
+                            <span class="btn-icon">📡</span> Fetch Towers
+                        </button>
+                        <button id="btn-build-graph" class="btn btn-secondary" style="flex: 1;" disabled title="Construct undirected interference graph">
+                            <span class="btn-icon">🕸️</span> Build Graph
+                        </button>
+                    </div>
                     <div id="cells-status" class="status-callout" aria-live="polite"></div>
                 </div>
 
@@ -172,9 +198,12 @@
                     </div>
                 </div>
 
-                <div class="dock-section">
+                <div class="dock-section" style="display: flex; flex-direction: column; gap: 8px;">
                     <button id="btn-optimize" class="btn btn-accent btn-block" disabled>
                         <span class="btn-icon">⚡</span> Optimize Frequencies
+                    </button>
+                    <button id="btn-compare-action" class="btn btn-secondary btn-block" disabled>
+                        <span class="btn-icon">⚖️</span> Compare Solvers
                     </button>
                 </div>
 
@@ -193,6 +222,11 @@
                             <input type="checkbox" id="toggle-markers" checked />
                             <span class="toggle-track"></span>
                             <span class="toggle-text">Cell Markers &amp; Labels</span>
+                        </label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="toggle-edges" checked />
+                            <span class="toggle-track"></span>
+                            <span class="toggle-text">Interference Edges</span>
                         </label>
                     </div>
                 </div>

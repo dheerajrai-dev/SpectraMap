@@ -27,6 +27,7 @@ const state = {
     activeView: "map",
     selectedTowerId: null,
     isolatedFrequency: null,
+    coverageRadiusOverride: 0,
     cellMarkersLayer: null,
     coverageCirclesLayer: null,
     edgesLayer: null,
@@ -114,7 +115,7 @@ function initMap() {
     // NOTE (Phase 2): As per master prompt Section 4, the main geographic map MUST NOT display
     // lines connecting two towers or cell records. state.edgesLayer is NOT added to state.map.
     state.coverageCirclesLayer = L.layerGroup().addTo(state.map);
-    state.edgesLayer = L.layerGroup();
+    state.edgesLayer = L.layerGroup().addTo(state.map);
     state.cellMarkersLayer = L.layerGroup().addTo(state.map);
 
     // 4. Draw initial search center and radius circle
@@ -228,6 +229,34 @@ function initControls() {
         btnFetch.addEventListener("click", fetchNearbyCells);
     }
 
+    // "Build Interference Graph" button
+    const btnBuildGraph = document.getElementById("btn-build-graph");
+    if (btnBuildGraph) {
+        btnBuildGraph.addEventListener("click", () => buildInterferenceGraphUI(true));
+    }
+
+    // "Compare Solvers" direct action button
+    const btnCompareAction = document.getElementById("btn-compare-action");
+    if (btnCompareAction) {
+        btnCompareAction.addEventListener("click", () => runComparisonDirectly());
+    }
+
+    // Coverage Radius Override slider
+    const overrideSlider = document.getElementById("override-slider");
+    const overrideLabel = document.getElementById("override-label");
+    if (overrideSlider && overrideLabel) {
+        overrideSlider.addEventListener("input", (e) => {
+            const val = Number(e.target.value);
+            state.coverageRadiusOverride = val;
+            overrideLabel.textContent = val > 0 ? `${val}m (Uniform)` : "Data Default";
+        });
+        overrideSlider.addEventListener("change", () => {
+            if (state.cells && state.cells.length > 0) {
+                buildInterferenceGraphUI(false);
+            }
+        });
+    }
+
     // "Optimize Frequencies" button
     const btnOptimize = document.getElementById("btn-optimize");
     if (btnOptimize) {
@@ -261,6 +290,22 @@ function initControls() {
             } else {
                 if (state.map.hasLayer(state.cellMarkersLayer)) {
                     state.map.removeLayer(state.cellMarkersLayer);
+                }
+            }
+        });
+    }
+
+    // Toggle interference edges
+    const toggleEdges = document.getElementById("toggle-edges");
+    if (toggleEdges) {
+        toggleEdges.addEventListener("change", (e) => {
+            if (e.target.checked) {
+                if (!state.map.hasLayer(state.edgesLayer)) {
+                    state.map.addLayer(state.edgesLayer);
+                }
+            } else {
+                if (state.map.hasLayer(state.edgesLayer)) {
+                    state.map.removeLayer(state.edgesLayer);
                 }
             }
         });
@@ -529,9 +574,15 @@ function loadDemoTowers() {
     if (metricTowers) metricTowers.textContent = demoTowers.length;
     resetOptimizationScoreboard();
 
-    statusMsg.textContent = `Generated ${demoTowers.length} simulated cellular towers with overlapping coverage. Ready to optimize!`;
+    statusMsg.textContent = `Generated ${demoTowers.length} simulated cellular towers with overlapping coverage. Building interference graph...`;
     statusMsg.style.color = "var(--accent-emerald)";
+    const btnBuild = document.getElementById("btn-build-graph");
+    const btnCompare = document.getElementById("btn-compare-action");
+    if (btnBuild) btnBuild.disabled = false;
     if (btnOptimize) btnOptimize.disabled = false;
+    if (btnCompare) btnCompare.disabled = false;
+
+    buildInterferenceGraphUI(false);
 }
 
 /**
@@ -541,6 +592,8 @@ async function fetchNearbyCells() {
     const btnFetch = document.getElementById("btn-fetch");
     const statusMsg = document.getElementById("cells-status");
     const btnOptimize = document.getElementById("btn-optimize");
+    const btnBuild = document.getElementById("btn-build-graph");
+    const btnCompare = document.getElementById("btn-compare-action");
     const metricTowers = document.getElementById("metric-towers");
 
     btnFetch.disabled = true;
@@ -572,27 +625,36 @@ async function fetchNearbyCells() {
         if (state.cells.length === 0) {
             statusMsg.innerHTML = "No crowd-sourced towers registered at this exact spot. <strong>Tip:</strong> Pick <em>'South Delhi (100+ Live Towers)'</em> or click <em>'⚡ Demo Grid'</em>!";
             statusMsg.style.color = "var(--accent-amber)";
+            if (btnBuild) btnBuild.disabled = true;
             if (btnOptimize) btnOptimize.disabled = true;
+            if (btnCompare) btnCompare.disabled = true;
         } else {
             let info = `Found ${state.cells.length} towers within ${state.radiusMetres}m.`;
             if (data.metadata?.is_partial) {
                 info += " (Results include 50-limit tile caps).";
             }
-            if (data.metadata?.cached) {
+            if (data.metadata?.cached || data.cached) {
                 info += " [Loaded from cache]";
             }
             statusMsg.textContent = info;
             statusMsg.style.color = "var(--accent-emerald)";
+            if (btnBuild) btnBuild.disabled = false;
             if (btnOptimize) btnOptimize.disabled = false;
+            if (btnCompare) btnCompare.disabled = false;
+
+            // Automatically build interference graph from returned towers
+            buildInterferenceGraphUI(false);
         }
     } catch (err) {
         console.error("Fetch cells failed:", err);
         statusMsg.textContent = `Error: ${err.message}`;
         statusMsg.style.color = "var(--accent-rose)";
+        if (btnBuild) btnBuild.disabled = true;
         if (btnOptimize) btnOptimize.disabled = true;
+        if (btnCompare) btnCompare.disabled = true;
     } finally {
         btnFetch.disabled = false;
-        btnFetch.textContent = "Fetch Cell Records";
+        btnFetch.textContent = "Fetch Towers";
     }
 }
 
@@ -786,6 +848,17 @@ function closeVertexInspector() {
                 covCircle.setStyle({ fill: false, fillOpacity: 0.0, opacity: 0.35, color: "#64748b", weight: 1.5 });
             }
         }
+        if (state.edgesLayer) {
+            state.edgesLayer.eachLayer((layer) => {
+                layer.setStyle({
+                    color: "rgba(239, 68, 68, 0.45)",
+                    weight: 1.8,
+                    opacity: 0.75,
+                    dashArray: "4, 4",
+                });
+            });
+        }
+
         state.selectedTowerId = null;
 
         if (state.activeView === "graph") {
@@ -873,14 +946,41 @@ function openVertexInspector(towerId) {
     // Degree and neighbors
     const neighbors = [];
     state.interferenceEdges.forEach((edge) => {
-        if (edge.source_id === towerId) {
-            neighbors.push({ id: edge.target_id, dist: edge.distance_m });
-        } else if (edge.target_id === towerId) {
-            neighbors.push({ id: edge.source_id, dist: edge.distance_m });
+        const u = edge.source_id || edge.source;
+        const v = edge.target_id || edge.target;
+        if (u === towerId) {
+            neighbors.push({ id: v, dist: edge.distance_m, threshold: edge.threshold_m, rule: edge.rule });
+        } else if (v === towerId) {
+            neighbors.push({ id: u, dist: edge.distance_m, threshold: edge.threshold_m, rule: edge.rule });
         }
     });
 
     document.getElementById("insp-degree").textContent = neighbors.length;
+
+    // Highlight incident edges on map and dim others
+    if (state.edgesLayer) {
+        state.edgesLayer.eachLayer((layer) => {
+            if (!layer.edgeData) return;
+            const u = layer.edgeData.source_id || layer.edgeData.source;
+            const v = layer.edgeData.target_id || layer.edgeData.target;
+            if (u === towerId || v === towerId) {
+                layer.setStyle({
+                    color: "#f59e0b",
+                    weight: 3.5,
+                    opacity: 1.0,
+                    dashArray: null,
+                });
+                layer.bringToFront();
+            } else {
+                layer.setStyle({
+                    color: "rgba(239, 68, 68, 0.15)",
+                    weight: 1.0,
+                    opacity: 0.25,
+                    dashArray: "3, 3",
+                });
+            }
+        });
+    }
 
     // Check validation / conflict status
     const inspValidation = document.getElementById("insp-validation");
@@ -896,7 +996,7 @@ function openVertexInspector(towerId) {
         inspValidation.textContent = "Awaiting optimization";
     }
 
-    // Render neighbor list with stable cell labels
+    // Render neighbor list with stable cell labels and edge rationale
     const listEl = document.getElementById("insp-neighbor-list");
     listEl.innerHTML = "";
     if (neighbors.length === 0) {
@@ -908,13 +1008,19 @@ function openVertexInspector(towerId) {
             const li = document.createElement("li");
             li.className = "neighbor-item";
             li.style.cursor = "pointer";
-            const channelText = nFreq !== null && nFreq !== undefined ? `f${nFreq + 1}` : "—";
+            const channelText = nFreq !== null && nFreq !== undefined ? `Channel f${nFreq + 1}` : "Unassigned";
             const channelColor = nFreq !== null && nFreq !== undefined ? getFrequencyColor(nFreq) : "var(--text-muted)";
+            const thresh = n.threshold || (cell.range_m + (nCell?.range_m || 800));
             li.innerHTML = `
-                <span>Cell ${nCell?.label ?? '—'} <small>(#${nCell?.cell_id ?? n.id})</small> (${Math.round(n.dist)}m)</span>
-                <span style="color: ${channelColor}; font-weight: 700; font-family: var(--font-mono);">
-                    ${channelText}
-                </span>
+                <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                    <span><strong>Cell ${nCell?.label ?? '—'}</strong> <small>(#${nCell?.cell_id ?? n.id})</small></span>
+                    <span style="color: ${channelColor}; font-weight: 700; font-family: var(--font-mono); font-size: 0.78rem;">
+                        ${channelText}
+                    </span>
+                </div>
+                <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 3px;">
+                    Overlap: dist ${Math.round(n.dist)}m &le; threshold ${Math.round(thresh)}m (r<sub>u</sub> + r<sub>v</sub>)
+                </div>
             `;
             li.addEventListener("click", () => openVertexInspector(n.id));
             listEl.appendChild(li);
@@ -1018,6 +1124,8 @@ async function runFrequencyOptimization() {
             },
             radius_m: state.radiusMetres,
             cells: state.cells.length > 0 ? state.cells : null,
+            algorithm: state.activeAlgorithm,
+            radius_override_m: state.coverageRadiusOverride > 0 ? state.coverageRadiusOverride : null,
         };
 
         const res = await fetch("/api/optimize", {
@@ -1410,16 +1518,189 @@ function renderCompareModalContent() {
 }
 
 /**
- * Draws polyline edges between towers only for internal state/topology.
- * Guaranteed: NO edge lines are added to state.map.
+ * Constructs the undirected interference graph via POST /api/graph/build.
+ */
+async function buildInterferenceGraphUI(userInitiated = false) {
+    if (!state.cells || state.cells.length === 0) return;
+
+    const btnBuild = document.getElementById("btn-build-graph");
+    const btnOptimize = document.getElementById("btn-optimize");
+    const btnCompare = document.getElementById("btn-compare-action");
+    const statusMsg = document.getElementById("cells-status");
+
+    if (btnBuild) {
+        btnBuild.disabled = true;
+        btnBuild.textContent = "Building...";
+    }
+    if (statusMsg && userInitiated) {
+        statusMsg.textContent = "Constructing interference graph from tower overlap...";
+        statusMsg.style.color = "var(--text-secondary)";
+    }
+
+    try {
+        const payload = {
+            center: { latitude: state.currentCenter.lat, longitude: state.currentCenter.lon },
+            radius_m: state.radiusMetres,
+            cells: state.cells,
+            radius_override_m: state.coverageRadiusOverride > 0 ? state.coverageRadiusOverride : null,
+        };
+
+        const res = await fetch("/api/graph/build", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+            throw new Error(data.detail || `Graph build failed (HTTP ${res.status})`);
+        }
+
+        state.interferenceEdges = data.edges || [];
+        renderInterferenceEdges(state.interferenceEdges);
+
+        // Update KPI metrics on scoreboard
+        const m = data.metrics || {};
+        const metricTowers = document.getElementById("metric-towers");
+        const metricEdges = document.getElementById("metric-edges");
+        const metricDegree = document.getElementById("metric-degree");
+        const metricDensity = document.getElementById("metric-density");
+
+        if (metricTowers) metricTowers.textContent = m.vertex_count ?? state.cells.length;
+        if (metricEdges) metricEdges.textContent = m.edge_count ?? data.edges.length;
+        if (metricDegree) metricDegree.textContent = m.max_degree ?? "—";
+        if (metricDensity) metricDensity.textContent = m.density !== undefined ? m.density.toFixed(3) : "—";
+
+        // If graph view is active, update canvas
+        if (state.activeView === "graph") {
+            renderGraphExplorer();
+        }
+
+        if (btnOptimize) btnOptimize.disabled = false;
+        if (btnCompare) btnCompare.disabled = false;
+
+        if (statusMsg) {
+            statusMsg.textContent = `Graph built: ${data.nodes.length} vertices, ${data.edges.length} conflict edges (overlap: d <= r1 + r2).`;
+            statusMsg.style.color = "var(--accent-emerald)";
+        }
+    } catch (err) {
+        console.error("Graph build error:", err);
+        if (statusMsg) {
+            statusMsg.textContent = `Graph build error: ${err.message}`;
+            statusMsg.style.color = "var(--accent-rose)";
+        }
+    } finally {
+        if (btnBuild) {
+            btnBuild.disabled = false;
+            btnBuild.innerHTML = '<span class="btn-icon">🕸️</span> Build Graph';
+        }
+    }
+}
+
+/**
+ * Runs side-by-side benchmark comparison via POST /api/compare.
+ */
+async function runComparisonDirectly() {
+    const compareModal = document.getElementById("compare-modal");
+    if (compareModal) {
+        compareModal.classList.add("open");
+        compareModal.setAttribute("aria-hidden", "false");
+    }
+
+    const container = document.getElementById("compare-modal-body");
+    if (container) {
+        container.innerHTML = `
+            <div class="compare-placeholder">
+                <span class="spinner" style="font-size: 2rem; display: inline-block;">⏳</span>
+                <p style="margin-top: 10px; color: var(--text-primary); font-weight: 600;">Running DSatur and Welsh–Powell on identical graph...</p>
+                <small style="color: var(--text-muted);">Comparing channel counts, runtime, and verifying zero adjacent conflicts...</small>
+            </div>
+        `;
+    }
+
+    try {
+        const payload = {
+            center: { latitude: state.currentCenter.lat, longitude: state.currentCenter.lon },
+            radius_m: state.radiusMetres,
+            cells: state.cells,
+            radius_override_m: state.coverageRadiusOverride > 0 ? state.coverageRadiusOverride : null,
+        };
+
+        const res = await fetch("/api/compare", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+            throw new Error(data.detail || `Comparison failed (HTTP ${res.status})`);
+        }
+
+        state.optimizationResults = {
+            metrics: data.metrics,
+            dsatur: data.dsatur,
+            welsh_powell: data.welsh_powell,
+            exact: data.exact,
+            best_algorithm: data.comparison.fewer_colors_heuristic,
+            comparison_summary: data.comparison.summary,
+        };
+
+        if (data.edges && data.edges.length > 0) {
+            state.interferenceEdges = data.edges;
+            renderInterferenceEdges(state.interferenceEdges);
+        }
+
+        updateScoreboard(state.optimizationResults);
+        applyActiveColoring();
+        renderCompareModalContent();
+    } catch (err) {
+        console.error("Comparison request failed:", err);
+        if (container) {
+            container.innerHTML = `<div class="compare-placeholder" style="color: var(--accent-rose); font-weight: 600;">Error: ${err.message}</div>`;
+        }
+    }
+}
+
+/**
+ * Draws polyline edges between towers on Leaflet map using returned graph edges.
  */
 function renderInterferenceEdges(edges) {
-    // Phase 2: As required by master prompt Section 4, the main geographic map MUST NOT display
-    // lines connecting two towers or cell records. Edge interference is inspected via
-    // the dedicated Graph Topology Canvas and the Vertex Inspector panel.
     state.edgesLayer.clearLayers();
-    if (state.map.hasLayer(state.edgesLayer)) {
-        state.map.removeLayer(state.edgesLayer);
+    if (!edges || edges.length === 0) return;
+
+    edges.forEach((edge) => {
+        const u = edge.source_id || edge.source;
+        const v = edge.target_id || edge.target;
+        const coords = [edge.source_coords, edge.target_coords];
+        if (coords[0] && coords[1] && coords[0][0] && coords[1][0]) {
+            const line = L.polyline(coords, {
+                color: "rgba(239, 68, 68, 0.45)",
+                weight: 1.8,
+                dashArray: "4, 4",
+                interactive: true,
+            });
+            line.bindTooltip(
+                `<strong>Modeled Interference Link</strong><br>${u} &harr; ${v}<br>Distance: ${edge.distance_m}m &le; Threshold: ${edge.threshold_m}m`,
+                { sticky: true }
+            );
+            line.on("click", () => {
+                openVertexInspector(u);
+            });
+            line.edgeData = edge;
+            state.edgesLayer.addLayer(line);
+        }
+    });
+
+    const toggle = document.getElementById("toggle-edges");
+    if (!toggle || toggle.checked) {
+        if (!state.map.hasLayer(state.edgesLayer)) {
+            state.edgesLayer.addTo(state.map);
+        }
+    } else {
+        if (state.map.hasLayer(state.edgesLayer)) {
+            state.map.removeLayer(state.edgesLayer);
+        }
     }
 }
 

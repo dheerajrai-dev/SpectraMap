@@ -9,23 +9,45 @@ import networkx as nx
 from data_service import haversine_distance
 
 
-def build_interference_graph(cells: list[dict[str, Any]]) -> nx.Graph:
+def build_interference_graph(
+    cells: list[dict[str, Any]],
+    radius_override_m: float | None = None,
+) -> nx.Graph:
     """
     Construct an undirected NetworkX graph from a list of normalized cell records.
     - Vertex V: Each cell record (identified by tower_id).
     - Edge E: Added between cells (u, v) if haversine_distance(u, v) <= range_u + range_v.
+    - If radius_override_m is provided and > 0, it overrides range_m for edge calculation
+      while preserving the original range_m in node attributes.
     """
     G = nx.Graph()
 
     # 1. Add all cell records as vertices with their metadata attached
     for cell in cells:
-        tower_id = cell.get("tower_id")
+        tower_id = cell.get("tower_id") or cell.get("id")
         if not tower_id:
             raise ValueError(f"Cell record missing tower_id: {cell}")
-        if "range_m" not in cell or cell["range_m"] <= 0:
-            raise ValueError(f"Cell {tower_id} has invalid or missing range_m: {cell.get('range_m')}")
 
-        G.add_node(tower_id, **cell)
+        lat = cell.get("latitude") if "latitude" in cell else cell.get("lat")
+        lon = cell.get("longitude") if "longitude" in cell else cell.get("lon")
+        if lat is None or lon is None:
+            raise ValueError(f"Cell {tower_id} missing latitude or longitude: {cell}")
+
+        orig_range = cell.get("range_m")
+        if orig_range is None or orig_range <= 0:
+            raise ValueError(f"Cell {tower_id} has invalid or missing range_m: {orig_range}")
+
+        eff_range = radius_override_m if (radius_override_m is not None and radius_override_m > 0) else float(orig_range)
+
+        node_data = dict(cell)
+        node_data["tower_id"] = tower_id
+        node_data["id"] = tower_id
+        node_data["latitude"] = float(lat)
+        node_data["longitude"] = float(lon)
+        node_data["range_m"] = float(orig_range)
+        node_data["effective_range_m"] = eff_range
+
+        G.add_node(tower_id, **node_data)
 
     # 2. Check all unique pairs for coverage circle overlap
     cell_nodes = list(G.nodes(data=True))
@@ -34,11 +56,21 @@ def build_interference_graph(cells: list[dict[str, Any]]) -> nx.Graph:
             data_a["latitude"], data_a["longitude"],
             data_b["latitude"], data_b["longitude"],
         )
-        threshold = data_a["range_m"] + data_b["range_m"]
+        threshold = data_a["effective_range_m"] + data_b["effective_range_m"]
 
-        # Overlapping coverage circles indicate potential radio interference
+        # Overlapping coverage circles indicate potential radio interference (closed disk <=)
         if dist <= threshold:
-            G.add_edge(id_a, id_b, distance_m=round(dist, 1), threshold_m=round(threshold, 1))
+            G.add_edge(
+                id_a,
+                id_b,
+                distance_m=round(dist, 1),
+                threshold_m=round(threshold, 1),
+                rule="d(u, v) <= r_u + r_v",
+            )
+
+    # 3. Store calculated degree on each node
+    for node_id in G.nodes():
+        G.nodes[node_id]["degree"] = G.degree(node_id)
 
     return G
 
@@ -50,6 +82,7 @@ def get_graph_metrics(graph: nx.Graph) -> dict[str, Any]:
     node_count = graph.number_of_nodes()
     edge_count = graph.number_of_edges()
     max_deg = max((deg for _, deg in graph.degree()), default=0)
+    avg_deg = round(sum(deg for _, deg in graph.degree()) / node_count, 2) if node_count > 0 else 0.0
 
     # Lower bound via maximum clique approximation: omega(G) <= chi(G)
     clique_lb = 0
@@ -68,11 +101,12 @@ def get_graph_metrics(graph: nx.Graph) -> dict[str, Any]:
 
     return {
         "node_count": node_count,
+        "vertex_count": node_count,
         "edge_count": edge_count,
         "density": round(nx.density(graph), 4) if node_count > 1 else 0.0,
         "connected_components": nx.number_connected_components(graph) if node_count > 0 else 0,
         "max_degree": max_deg,
-        "avg_degree": round(sum(deg for _, deg in graph.degree()) / node_count, 2) if node_count > 0 else 0.0,
+        "avg_degree": avg_deg,
         "clique_lower_bound": clique_lb,
         "brooks_upper_bound": brooks_ub,
     }
@@ -80,20 +114,70 @@ def get_graph_metrics(graph: nx.Graph) -> dict[str, Any]:
 
 def get_interference_edges(graph: nx.Graph) -> list[dict[str, Any]]:
     """
-    Extract edge endpoints with GPS coordinates for map rendering.
+    Extract edge endpoints with GPS coordinates for map and topology rendering.
     """
     edges: list[dict[str, Any]] = []
     for u, v, data in graph.edges(data=True):
         node_u = graph.nodes[u]
         node_v = graph.nodes[v]
+        lat_u = node_u.get("latitude", node_u.get("lat", 0.0))
+        lon_u = node_u.get("longitude", node_u.get("lon", 0.0))
+        lat_v = node_v.get("latitude", node_v.get("lat", 0.0))
+        lon_v = node_v.get("longitude", node_v.get("lon", 0.0))
         edges.append({
+            "source": u,
+            "target": v,
             "source_id": u,
             "target_id": v,
-            "source_coords": [node_u["latitude"], node_u["longitude"]],
-            "target_coords": [node_v["latitude"], node_v["longitude"]],
+            "source_coords": [lat_u, lon_u],
+            "target_coords": [lat_v, lon_v],
             "distance_m": data.get("distance_m", 0.0),
+            "threshold_m": data.get("threshold_m", 0.0),
+            "rule": data.get("rule", "d(u, v) <= r_u + r_v"),
         })
     return edges
+
+
+def serialize_graph_payload(graph: nx.Graph) -> dict[str, Any]:
+    """
+    Serialize NetworkX graph into clean JSON-serializable structure with nodes, edges, and metrics.
+    """
+    nodes = []
+    for node_id, data in graph.nodes(data=True):
+        lat = data.get("latitude", data.get("lat", 0.0))
+        lon = data.get("longitude", data.get("lon", 0.0))
+        range_m = data.get("range_m", 800.0)
+        eff_range = data.get("effective_range_m", range_m)
+        nodes.append({
+            "id": node_id,
+            "tower_id": node_id,
+            "lat": lat,
+            "lon": lon,
+            "latitude": lat,
+            "longitude": lon,
+            "range_m": range_m,
+            "effective_range_m": eff_range,
+            "degree": graph.degree(node_id),
+            "radio": data.get("radio", "LTE"),
+            "cell_id": data.get("cell_id"),
+            "is_range_estimated": data.get("is_range_estimated", False),
+            "range_source": data.get("range_source", "observed"),
+        })
+
+    edges = get_interference_edges(graph)
+    metrics = get_graph_metrics(graph)
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "metrics": metrics,
+        "assumptions": [
+            "Vertices represent valid localized cellular base station transceivers.",
+            "Undirected edges represent modeled co-channel interference proxy where circular coverage areas overlap: distance(u,v) <= radius(u) + radius(v).",
+            "Geodesic distances are computed using spherical Haversine formula (Earth radius = 6,371,000m).",
+            "Model is an educational graph theory demonstration, not an operational RF propagation simulation.",
+        ],
+    }
 
 
 def validate_coloring(graph: nx.Graph, coloring: dict[Any, int]) -> dict[str, Any]:
@@ -101,6 +185,7 @@ def validate_coloring(graph: nx.Graph, coloring: dict[Any, int]) -> dict[str, An
     Independently verify that a graph coloring has zero conflicts and no missing assignments.
     """
     conflicts: list[tuple[Any, Any]] = []
+    conflicting_edges: list[dict[str, Any]] = []
     missing_nodes: list[Any] = []
 
     # 1. Assert all graph vertices have an assigned non-negative integer color
@@ -113,11 +198,20 @@ def validate_coloring(graph: nx.Graph, coloring: dict[Any, int]) -> dict[str, An
                 missing_nodes.append(node)
 
     # 2. Iterate through every edge and assert adjacent vertices have distinct colors
-    for u, v in graph.edges():
+    for u, v, data in graph.edges(data=True):
         color_u = coloring.get(u) if coloring else None
         color_v = coloring.get(v) if coloring else None
         if color_u is not None and color_v is not None and color_u == color_v:
             conflicts.append((u, v))
+            conflicting_edges.append({
+                "source": u,
+                "target": v,
+                "source_id": u,
+                "target_id": v,
+                "color": color_u,
+                "distance_m": data.get("distance_m", 0.0),
+                "threshold_m": data.get("threshold_m", 0.0),
+            })
 
     is_valid = len(conflicts) == 0 and len(missing_nodes) == 0
     unique_colors = len({c for c in coloring.values() if isinstance(c, int) and not isinstance(c, bool) and c >= 0}) if coloring else 0
@@ -126,6 +220,7 @@ def validate_coloring(graph: nx.Graph, coloring: dict[Any, int]) -> dict[str, An
         "is_valid": is_valid,
         "conflict_count": len(conflicts),
         "conflicts": conflicts,
+        "conflicting_edges": conflicting_edges,
         "missing_count": len(missing_nodes),
         "missing_nodes": missing_nodes,
         "color_count": unique_colors,
