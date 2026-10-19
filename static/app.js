@@ -32,19 +32,51 @@ const state = {
     edgesLayer: null,
 };
 
-// Distinct color palette for up to 10 frequencies (Hex codes)
-const FREQUENCY_COLORS = [
+// Comprehensive frequency color palette with dynamic generator for arbitrary k
+const BASE_FREQUENCY_COLORS = [
     "#3b82f6", // Frequency 1: Blue
     "#10b981", // Frequency 2: Emerald Green
     "#f59e0b", // Frequency 3: Amber
-    "#ef4444", // Frequency 4: Red
+    "#ef4444", // Frequency 4: Crimson Red
     "#8b5cf6", // Frequency 5: Purple
-    "#ec4899", // Frequency 6: Pink
-    "#06b6d4", // Frequency 7: Cyan
+    "#06b6d4", // Frequency 6: Cyan
+    "#ec4899", // Frequency 7: Pink
     "#84cc16", // Frequency 8: Lime
     "#f97316", // Frequency 9: Orange
-    "#64748b", // Frequency 10: Slate
+    "#14b8a6", // Frequency 10: Teal
+    "#a855f7", // Frequency 11: Violet
+    "#eab308", // Frequency 12: Yellow
+    "#6366f1", // Frequency 13: Indigo
+    "#d946ef", // Frequency 14: Fuchsia
+    "#22c55e", // Frequency 15: Green
+    "#64748b", // Frequency 16: Slate
 ];
+
+/**
+ * Returns a distinct, accessible color for frequency group index (0-indexed).
+ * Supports arbitrary k colors with golden ratio hue progression.
+ */
+function getFrequencyColor(freqIndex) {
+    if (freqIndex >= 0 && freqIndex < BASE_FREQUENCY_COLORS.length) {
+        return BASE_FREQUENCY_COLORS[freqIndex];
+    }
+    const goldenAngle = 137.508;
+    const hue = Math.round((freqIndex * goldenAngle) % 360);
+    return `hsl(${hue}, 80%, 54%)`;
+}
+
+/**
+ * Generates deterministic alphabetic sequence labels: 0 -> A, 25 -> Z, 26 -> AA, etc.
+ */
+function getAlphaLabel(index) {
+    let label = "";
+    let n = index;
+    while (n >= 0) {
+        label = String.fromCharCode(65 + (n % 26)) + label;
+        n = Math.floor(n / 26) - 1;
+    }
+    return label;
+}
 
 // Preset locations with rich, guaranteed cell tower density
 const PRESET_LOCATIONS = {
@@ -58,6 +90,7 @@ document.addEventListener("DOMContentLoaded", () => {
     initMap();
     initControls();
     checkBackendStatus();
+    initStartupPrompt();
 });
 
 /**
@@ -77,9 +110,11 @@ function initMap() {
         attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
     }).addTo(state.map);
 
-    // 3. Layer groups to manage dynamic markers and lines easily
+    // 3. Layer groups to manage dynamic markers and coverage circles
+    // NOTE (Phase 2): As per master prompt Section 4, the main geographic map MUST NOT display
+    // lines connecting two towers or cell records. state.edgesLayer is NOT added to state.map.
     state.coverageCirclesLayer = L.layerGroup().addTo(state.map);
-    state.edgesLayer = L.layerGroup().addTo(state.map);
+    state.edgesLayer = L.layerGroup();
     state.cellMarkersLayer = L.layerGroup().addTo(state.map);
 
     // 4. Draw initial search center and radius circle
@@ -90,6 +125,7 @@ function initMap() {
         const presetSelect = document.getElementById("preset-select");
         if (presetSelect) presetSelect.value = "custom";
         setNewCenter(e.latlng.lat, e.latlng.lng);
+        updateLocationMode("manual");
     });
 }
 
@@ -109,6 +145,7 @@ function updateCenterVisuals(lat, lon) {
             const presetSelect = document.getElementById("preset-select");
             if (presetSelect) presetSelect.value = "custom";
             setNewCenter(pos.lat, pos.lng);
+            updateLocationMode("manual");
         });
     } else {
         state.centerMarker.setLatLng([lat, lon]);
@@ -167,6 +204,7 @@ function initControls() {
                 const loc = PRESET_LOCATIONS[val];
                 setNewCenter(loc.lat, loc.lon);
                 state.map.setView([loc.lat, loc.lon], 14);
+                updateLocationMode("preset", loc.name);
                 fetchNearbyCells();
             }
         });
@@ -196,10 +234,10 @@ function initControls() {
         btnOptimize.addEventListener("click", runFrequencyOptimization);
     }
 
-    // Toggle coverage halos checkbox
-    const toggleHalos = document.getElementById("toggle-halos");
-    if (toggleHalos) {
-        toggleHalos.addEventListener("change", (e) => {
+    // Toggle coverage circles
+    const toggleCircles = document.getElementById("toggle-circles");
+    if (toggleCircles) {
+        toggleCircles.addEventListener("change", (e) => {
             if (e.target.checked) {
                 if (!state.map.hasLayer(state.coverageCirclesLayer)) {
                     state.map.addLayer(state.coverageCirclesLayer);
@@ -212,17 +250,17 @@ function initControls() {
         });
     }
 
-    // Toggle interference lines checkbox
-    const toggleEdges = document.getElementById("toggle-edges");
-    if (toggleEdges) {
-        toggleEdges.addEventListener("change", (e) => {
+    // Toggle cell markers & labels
+    const toggleMarkers = document.getElementById("toggle-markers");
+    if (toggleMarkers) {
+        toggleMarkers.addEventListener("change", (e) => {
             if (e.target.checked) {
-                if (!state.map.hasLayer(state.edgesLayer)) {
-                    state.map.addLayer(state.edgesLayer);
+                if (!state.map.hasLayer(state.cellMarkersLayer)) {
+                    state.map.addLayer(state.cellMarkersLayer);
                 }
             } else {
-                if (state.map.hasLayer(state.edgesLayer)) {
-                    state.map.removeLayer(state.edgesLayer);
+                if (state.map.hasLayer(state.cellMarkersLayer)) {
+                    state.map.removeLayer(state.cellMarkersLayer);
                 }
             }
         });
@@ -305,12 +343,79 @@ function initControls() {
 }
 
 /**
+ * Updates the location status pill in the navbar.
+ */
+function updateLocationMode(mode, detail) {
+    const badge = document.getElementById("location-badge");
+    if (!badge) return;
+
+    if (mode === "gps") {
+        badge.textContent = "GPS Active";
+        badge.className = "badge badge-gps";
+    } else if (mode === "manual") {
+        badge.textContent = "Manual Center";
+        badge.className = "badge badge-manual";
+    } else if (mode === "demo") {
+        badge.textContent = "Demo Grid";
+        badge.className = "badge badge-demo";
+    } else if (mode === "preset") {
+        badge.textContent = detail ? `Preset: ${detail}` : "Preset Location";
+        badge.className = "badge badge-preset";
+    }
+}
+
+/**
+ * Initializes the initial visit geolocation prompt banner.
+ */
+function initStartupPrompt() {
+    const banner = document.getElementById("geo-banner");
+    const btnAllow = document.getElementById("btn-banner-allow");
+    const btnPreset = document.getElementById("btn-banner-preset");
+    const btnDismiss = document.getElementById("btn-banner-dismiss");
+
+    const hasPrompted = sessionStorage.getItem("spectramap_geo_prompted");
+    if (!hasPrompted && banner) {
+        banner.style.display = "block";
+    }
+
+    if (btnAllow) {
+        btnAllow.addEventListener("click", () => {
+            sessionStorage.setItem("spectramap_geo_prompted", "true");
+            if (banner) banner.style.display = "none";
+            handleGeolocation();
+        });
+    }
+
+    if (btnPreset) {
+        btnPreset.addEventListener("click", () => {
+            sessionStorage.setItem("spectramap_geo_prompted", "true");
+            if (banner) banner.style.display = "none";
+            const presetSelect = document.getElementById("preset-select");
+            if (presetSelect) presetSelect.value = "south_delhi";
+            const loc = PRESET_LOCATIONS.south_delhi;
+            setNewCenter(loc.lat, loc.lon);
+            state.map.setView([loc.lat, loc.lon], 14);
+            updateLocationMode("preset", "South Delhi");
+            fetchNearbyCells();
+        });
+    }
+
+    if (btnDismiss) {
+        btnDismiss.addEventListener("click", () => {
+            sessionStorage.setItem("spectramap_geo_prompted", "true");
+            if (banner) banner.style.display = "none";
+        });
+    }
+}
+
+/**
  * Uses browser HTML5 Geolocation to center map on user's current location.
  */
 function handleGeolocation() {
     const statusMsg = document.getElementById("cells-status");
     if (!navigator.geolocation) {
         if (statusMsg) statusMsg.textContent = "Geolocation is not supported by your browser.";
+        updateLocationMode("manual");
         return;
     }
 
@@ -324,13 +429,16 @@ function handleGeolocation() {
             const { latitude, longitude } = pos.coords;
             setNewCenter(latitude, longitude);
             state.map.setView([latitude, longitude], 14);
+            updateLocationMode("gps");
             if (statusMsg) {
-                statusMsg.textContent = "Location updated to your coordinates! Click 'Fetch Cell Records'.";
+                statusMsg.textContent = "GPS position acquired. Fetching local cells...";
                 statusMsg.style.color = "var(--accent-emerald)";
             }
+            fetchNearbyCells();
         },
         (err) => {
             console.warn("Geolocation failed:", err.message);
+            updateLocationMode("manual");
             if (statusMsg) {
                 statusMsg.textContent = "Could not get GPS location. Using manual map point.";
                 statusMsg.style.color = "var(--accent-amber)";
@@ -375,6 +483,7 @@ function loadDemoTowers() {
     }
 
     state.cells = demoTowers;
+    updateLocationMode("demo");
     renderCellTowers(demoTowers);
 
     if (metricTowers) metricTowers.textContent = demoTowers.length;
@@ -448,7 +557,8 @@ async function fetchNearbyCells() {
 }
 
 /**
- * Renders cell towers on the map with sector rosette dispersion for co-located cells.
+ * Renders cell towers on the map with deterministic alphabetic labels,
+ * stable markers, and interactive coverage circles.
  */
 function renderCellTowers(cells) {
     state.cellMarkersLayer.clearLayers();
@@ -458,7 +568,21 @@ function renderCellTowers(cells) {
     state.cellsById = {};
     state.coverageCirclesById = {};
 
-    // Group cells by physical mast location (rounded to 5 decimal places)
+    // Sort cells deterministically: North to South (lat descending), West to East (lon ascending), then tower_id
+    cells.sort((a, b) => {
+        if (b.latitude !== a.latitude) return b.latitude - a.latitude;
+        if (a.longitude !== b.longitude) return a.longitude - b.longitude;
+        return String(a.tower_id).localeCompare(String(b.tower_id));
+    });
+
+    // Assign stable alphabetic labels (A, B, C... Z, AA, AB...)
+    cells.forEach((cell, idx) => {
+        cell.label = getAlphaLabel(idx);
+        cell.labelIndex = idx;
+        state.cellsById[cell.tower_id] = cell;
+    });
+
+    // Group cells by physical mast location (rounded to 5 decimal places) for rosette dispersion
     const mastGroups = {};
     cells.forEach((cell) => {
         const key = `${cell.latitude.toFixed(5)},${cell.longitude.toFixed(5)}`;
@@ -467,8 +591,6 @@ function renderCellTowers(cells) {
     });
 
     cells.forEach((cell) => {
-        state.cellsById[cell.tower_id] = cell;
-
         // Calculate visual display coordinates (rosette dispersion for co-located sectors)
         const key = `${cell.latitude.toFixed(5)},${cell.longitude.toFixed(5)}`;
         const group = mastGroups[key];
@@ -507,32 +629,40 @@ function renderCellTowers(cells) {
         cell._displayLat = displayLat;
         cell._displayLon = displayLon;
 
-        // 1. Subtle coverage circle (faint outline, zero fill to prevent opacity wash)
+        // 1. Coverage circle (subtle faint outline before optimization; filled with frequency color once optimized)
+        const isEstimated = Boolean(cell.is_range_estimated);
+        const radiusM = Math.max(50, Number(cell.range_m) || 800);
         const coverageCircle = L.circle([cell.latitude, cell.longitude], {
-            radius: cell.range_m,
-            color: "#38bdf8",
-            weight: 1,
-            opacity: 0.22,
+            radius: radiusM,
+            color: "#64748b",
+            weight: 1.5,
+            opacity: 0.35,
             fill: false,
+            fillColor: "#3b82f6",
             fillOpacity: 0.0,
-            dashArray: "3, 4",
         });
+
+        const estTag = isEstimated ? " (Estimated Default)" : "";
+        coverageCircle.bindTooltip(`Coverage Area: Cell ${cell.label} (#${cell.cell_id}) — Radius: ${Math.round(radiusM)}m${estTag}`, { sticky: true });
+        coverageCircle.on("click", () => openVertexInspector(cell.tower_id));
+
         state.coverageCirclesLayer.addLayer(coverageCircle);
         state.coverageCirclesById[cell.tower_id] = coverageCircle;
 
-        // 2. High-legibility custom DivIcon marker
+        // 2. High-legibility custom DivIcon marker with stable alphabetic label
         const markerIcon = L.divIcon({
             className: "tower-marker-div",
             html: `<div class="tower-marker-wrap" id="marker-wrap-${cell.tower_id}">
-                     <div class="tower-marker-circle" id="marker-circle-${cell.tower_id}">•</div>
+                     <div class="tower-marker-circle" id="marker-circle-${cell.tower_id}" title="Cell ${cell.label} (#${cell.cell_id})">
+                       <span class="marker-label">${cell.label}</span>
+                     </div>
                    </div>`,
-            iconSize: [24, 24],
-            iconAnchor: [12, 12],
+            iconSize: [28, 28],
+            iconAnchor: [14, 14],
         });
 
         const marker = L.marker([displayLat, displayLon], { icon: markerIcon });
 
-        // Click handler opens contextual vertex inspector
         marker.on("click", () => {
             openVertexInspector(cell.tower_id);
         });
@@ -541,16 +671,18 @@ function renderCellTowers(cells) {
         const popupContent = `
             <div class="tower-popup">
                 <div class="tower-popup-header">
-                    <span class="tower-popup-title">Cell #${cell.cell_id}</span>
+                    <span class="tower-popup-title">Cell ${cell.label} <small>(#${cell.cell_id})</small></span>
                     <span class="radio-badge">${cell.radio}</span>
                 </div>
                 <div class="tower-popup-details">
+                    <span class="label">Assigned Freq:</span>
+                    <span class="val" id="popup-freq-${cell.tower_id}" style="color: var(--text-muted);">Unassigned</span>
                     <span class="label">Latitude:</span>
                     <span class="val">${cell.latitude.toFixed(5)}°</span>
                     <span class="label">Longitude:</span>
                     <span class="val">${cell.longitude.toFixed(5)}°</span>
                     <span class="label">Coverage:</span>
-                    <span class="val">${Math.round(cell.range_m)} m</span>
+                    <span class="val">${Math.round(radiusM)} m ${isEstimated ? '<small style="color:var(--accent-amber);">(Estimated)</small>' : ''}</span>
                     <span class="label">MCC / MNC:</span>
                     <span class="val">${cell.mcc ?? "—"} / ${cell.mnc ?? "—"}</span>
                     <span class="label">LAC:</span>
@@ -573,6 +705,22 @@ function renderCellTowers(cells) {
 }
 
 /**
+ * Determines which algorithm result to display based on user selection.
+ */
+function getSelectedAlgoKey() {
+    if (state.activeAlgorithm === "welsh_powell") return "welsh_powell";
+    if (state.activeAlgorithm === "exact") {
+        return state.optimizationResults?.exact?.coloring ? "exact" : "dsatur";
+    }
+    if (state.activeAlgorithm === "dsatur") return "dsatur";
+    // "both": pick proven optimal or best algorithm
+    const best = state.optimizationResults?.best_algorithm;
+    if (best === "exact_dsatur_bnb" && state.optimizationResults?.exact?.coloring) return "exact";
+    if (best === "welsh_powell") return "welsh_powell";
+    return "dsatur";
+}
+
+/**
  * Closes the slide-over inspector drawer and restores highlights.
  */
 function closeVertexInspector() {
@@ -589,7 +737,14 @@ function closeVertexInspector() {
 
         const covCircle = state.coverageCirclesById?.[state.selectedTowerId];
         if (covCircle) {
-            covCircle.setStyle({ fill: false, fillOpacity: 0.0, opacity: 0.22, weight: 1 });
+            const algoKey = getSelectedAlgoKey();
+            const coloring = state.optimizationResults?.[algoKey]?.coloring;
+            if (coloring && coloring[state.selectedTowerId] !== undefined) {
+                const color = getFrequencyColor(coloring[state.selectedTowerId]);
+                covCircle.setStyle({ fill: true, fillColor: color, fillOpacity: 0.18, color: color, opacity: 0.85, weight: 1.5 });
+            } else {
+                covCircle.setStyle({ fill: false, fillOpacity: 0.0, opacity: 0.35, color: "#64748b", weight: 1.5 });
+            }
         }
         state.selectedTowerId = null;
 
@@ -616,7 +771,14 @@ function openVertexInspector(towerId) {
 
         const prevCov = state.coverageCirclesById?.[state.selectedTowerId];
         if (prevCov) {
-            prevCov.setStyle({ fill: false, fillOpacity: 0.0, opacity: 0.22, weight: 1 });
+            const algoKey = getSelectedAlgoKey();
+            const coloring = state.optimizationResults?.[algoKey]?.coloring;
+            if (coloring && coloring[state.selectedTowerId] !== undefined) {
+                const color = getFrequencyColor(coloring[state.selectedTowerId]);
+                prevCov.setStyle({ fill: true, fillColor: color, fillOpacity: 0.18, color: color, opacity: 0.85, weight: 1.5 });
+            } else {
+                prevCov.setStyle({ fill: false, fillOpacity: 0.0, opacity: 0.35, color: "#64748b", weight: 1.5 });
+            }
         }
     }
 
@@ -628,23 +790,30 @@ function openVertexInspector(towerId) {
 
     // Highlight current coverage circle on map
     const currCov = state.coverageCirclesById?.[towerId];
+    const algoKey = getSelectedAlgoKey();
+    const coloring = state.optimizationResults?.[algoKey]?.coloring;
     if (currCov) {
-        currCov.setStyle({ fill: true, fillOpacity: 0.12, opacity: 0.85, weight: 2 });
+        if (coloring && coloring[towerId] !== undefined) {
+            const color = getFrequencyColor(coloring[towerId]);
+            currCov.setStyle({ fill: true, fillColor: color, fillOpacity: 0.35, color: color, opacity: 1.0, weight: 3 });
+        } else {
+            currCov.setStyle({ fill: true, fillColor: "#38bdf8", fillOpacity: 0.15, color: "#38bdf8", opacity: 0.9, weight: 2.5 });
+        }
     }
 
-    // Header info
+    // Header info with stable cell label
     document.getElementById("inspector-radio").textContent = cell.radio;
-    document.getElementById("inspector-cell-id").textContent = `Cell #${cell.cell_id}`;
+    document.getElementById("inspector-cell-id").textContent = `Cell ${cell.label} (#${cell.cell_id})`;
 
     // Assigned frequency badge (1-indexed channels: f1, f2, f3...)
     const freqBadge = document.getElementById("inspector-freq-badge");
-    const algoKey = state.activeAlgorithm === "welsh_powell" ? "welsh_powell" : "dsatur";
-    const coloring = state.optimizationResults?.[algoKey]?.coloring;
     if (coloring && coloring[towerId] !== undefined) {
         const freq = coloring[towerId];
         const channelNum = freq + 1;
-        const color = FREQUENCY_COLORS[freq % FREQUENCY_COLORS.length];
-        freqBadge.textContent = `Channel f${channelNum} (${algoKey === "welsh_powell" ? "Welsh-Powell" : "DSATUR"})`;
+        const color = getFrequencyColor(freq);
+        const algoName = algoKey === "welsh_powell" ? "Welsh-Powell" :
+                         algoKey === "exact" ? "Exact Optimal" : "DSATUR";
+        freqBadge.textContent = `Channel f${channelNum} (${algoName})`;
         freqBadge.style.color = color;
         freqBadge.style.borderColor = color;
         freqBadge.style.display = "inline-block";
@@ -655,8 +824,9 @@ function openVertexInspector(towerId) {
     }
 
     // Geographic fields
+    const isEstimated = Boolean(cell.is_range_estimated);
     document.getElementById("insp-coords").textContent = `${cell.latitude.toFixed(5)}°, ${cell.longitude.toFixed(5)}°`;
-    document.getElementById("insp-range").textContent = `${Math.round(cell.range_m)} m`;
+    document.getElementById("insp-range").innerHTML = `${Math.round(cell.range_m)} m ${isEstimated ? '<small style="color:var(--accent-amber); font-size:0.65rem;">(Estimated default)</small>' : ''}`;
     document.getElementById("insp-mcc-mnc").textContent = `${cell.mcc ?? "—"} / ${cell.mnc ?? "—"}`;
     document.getElementById("insp-lac").textContent = `${cell.lac ?? "—"}`;
 
@@ -686,7 +856,7 @@ function openVertexInspector(towerId) {
         inspValidation.textContent = "Awaiting optimization";
     }
 
-    // Render neighbor list
+    // Render neighbor list with stable cell labels
     const listEl = document.getElementById("insp-neighbor-list");
     listEl.innerHTML = "";
     if (neighbors.length === 0) {
@@ -699,9 +869,9 @@ function openVertexInspector(towerId) {
             li.className = "neighbor-item";
             li.style.cursor = "pointer";
             const channelText = nFreq !== null && nFreq !== undefined ? `f${nFreq + 1}` : "—";
-            const channelColor = nFreq !== null && nFreq !== undefined ? FREQUENCY_COLORS[nFreq % FREQUENCY_COLORS.length] : "var(--text-muted)";
+            const channelColor = nFreq !== null && nFreq !== undefined ? getFrequencyColor(nFreq) : "var(--text-muted)";
             li.innerHTML = `
-                <span>Cell #${nCell?.cell_id ?? n.id} (${Math.round(n.dist)}m)</span>
+                <span>Cell ${nCell?.label ?? '—'} <small>(#${nCell?.cell_id ?? n.id})</small> (${Math.round(n.dist)}m)</span>
                 <span style="color: ${channelColor}; font-weight: 700; font-family: var(--font-mono);">
                     ${channelText}
                 </span>
@@ -723,7 +893,7 @@ function openVertexInspector(towerId) {
 
 /**
  * Calls POST /api/optimize, displays metrics on scoreboard,
- * renders interference lines, and recolours cell markers by assigned frequency.
+ * colors coverage circles on geographic map, and updates comparison strip.
  */
 async function runFrequencyOptimization() {
     const btnOptimize = document.getElementById("btn-optimize");
@@ -731,7 +901,7 @@ async function runFrequencyOptimization() {
 
     btnOptimize.disabled = true;
     btnOptimize.textContent = "Optimizing...";
-    statusMsg.textContent = "Running Welsh-Powell & DSATUR algorithms on backend...";
+    statusMsg.textContent = "Running graph coloring heuristics & exact solver...";
     statusMsg.style.color = "var(--text-secondary)";
 
     try {
@@ -759,6 +929,8 @@ async function runFrequencyOptimization() {
         state.optimizationResults = {
             welsh_powell: data.welsh_powell,
             dsatur: data.dsatur,
+            exact: data.exact,
+            best_algorithm: data.best_algorithm,
         };
         state.interferenceEdges = data.edges || [];
 
@@ -772,14 +944,13 @@ async function runFrequencyOptimization() {
         // 2. Populate comparison table
         const wp = data.welsh_powell;
         const ds = data.dsatur;
+        const ex = data.exact;
 
-        if (wp) {
-            const isValid = wp.validation?.is_valid ?? wp.is_valid;
-            document.getElementById("res-wp-colors").textContent = `${wp.color_count} colors (${wp.runtime_ms.toFixed(2)} ms)`;
-            document.getElementById("res-wp-valid").innerHTML = isValid
-                ? '<span style="color: var(--accent-emerald)">✔ Valid</span>'
-                : '<span style="color: var(--accent-rose)">✖ Collision</span>';
-        }
+        const pillDsatur = document.getElementById("pill-dsatur");
+        const pillWp = document.getElementById("pill-wp");
+        const pillExact = document.getElementById("pill-exact");
+
+        [pillDsatur, pillWp, pillExact].forEach((p) => p?.classList.remove("best-algo-pill"));
 
         if (ds) {
             const isValid = ds.validation?.is_valid ?? ds.is_valid;
@@ -789,10 +960,42 @@ async function runFrequencyOptimization() {
                 : '<span style="color: var(--accent-rose)">✖ Collision</span>';
         }
 
-        // 3. Render interference edge polylines
+        if (wp) {
+            const isValid = wp.validation?.is_valid ?? wp.is_valid;
+            document.getElementById("res-wp-colors").textContent = `${wp.color_count} colors (${wp.runtime_ms.toFixed(2)} ms)`;
+            document.getElementById("res-wp-valid").innerHTML = isValid
+                ? '<span style="color: var(--accent-emerald)">✔ Valid</span>'
+                : '<span style="color: var(--accent-rose)">✖ Collision</span>';
+        }
+
+        if (ex) {
+            const elExColors = document.getElementById("res-exact-colors");
+            const elExValid = document.getElementById("res-exact-valid");
+            if (ex.proven_optimal) {
+                if (elExColors) elExColors.textContent = `${ex.color_count} colors (${ex.runtime_ms.toFixed(2)} ms)`;
+                if (elExValid) elExValid.innerHTML = `<span style="color: var(--accent-emerald)">✔ Optimal (χ=${ex.color_count})</span>`;
+            } else if (ex.status === "skipped_size_limit") {
+                if (elExColors) elExColors.textContent = "N > 25 (Skipped)";
+                if (elExValid) elExValid.innerHTML = `<span style="color: var(--text-muted)">Heuristic Only</span>`;
+            } else if (ex.status === "timeout") {
+                if (elExColors) elExColors.textContent = `${ex.color_count} colors`;
+                if (elExValid) elExValid.innerHTML = `<span style="color: var(--accent-amber)">⏱ Timeout</span>`;
+            } else {
+                if (elExColors) elExColors.textContent = "Unavailable";
+                if (elExValid) elExValid.innerHTML = `<span style="color: var(--text-muted)">—</span>`;
+            }
+        }
+
+        // Highlight best algorithm pill
+        const best = data.best_algorithm;
+        if (best === "dsatur") pillDsatur?.classList.add("best-algo-pill");
+        else if (best === "welsh_powell") pillWp?.classList.add("best-algo-pill");
+        else if (best === "exact_dsatur_bnb") pillExact?.classList.add("best-algo-pill");
+
+        // 3. Keep edge lines OFF the geographic map (clear edges layer)
         renderInterferenceEdges(state.interferenceEdges);
 
-        // 4. Color cell markers according to the active algorithm
+        // 4. Color coverage circles & cell markers according to the active algorithm
         applyActiveColoring();
 
         // 5. If graph view is active, update canvas
@@ -800,7 +1003,11 @@ async function runFrequencyOptimization() {
             renderGraphExplorer();
         }
 
-        statusMsg.textContent = `Optimization complete! DSATUR: ${ds?.color_count} frequencies, Welsh-Powell: ${wp?.color_count} frequencies.`;
+        let summaryText = `Optimization complete! DSATUR: ${ds?.color_count} colors, Welsh-Powell: ${wp?.color_count} colors.`;
+        if (ex?.proven_optimal) {
+            summaryText += ` Proven minimum chromatic number χ(G) = ${ex.color_count}.`;
+        }
+        statusMsg.textContent = summaryText;
         statusMsg.style.color = "var(--accent-emerald)";
     } catch (err) {
         console.error("Optimization failed:", err);
@@ -813,82 +1020,73 @@ async function runFrequencyOptimization() {
 }
 
 /**
- * Draws polyline edges between towers that interfere with each other.
+ * Draws polyline edges between towers only for internal state/topology.
+ * Guaranteed: NO edge lines are added to state.map.
  */
 function renderInterferenceEdges(edges) {
+    // Phase 2: As required by master prompt Section 4, the main geographic map MUST NOT display
+    // lines connecting two towers or cell records. Edge interference is inspected via
+    // the dedicated Graph Topology Canvas and the Vertex Inspector panel.
     state.edgesLayer.clearLayers();
-
-    // If more than 500 edges, render with lower opacity to prevent lag
-    const isDense = edges.length > 500;
-    const opacity = isDense ? 0.35 : 0.65;
-    const weight = isDense ? 1 : 2;
-
-    edges.forEach((edge) => {
-        const line = L.polyline(
-            [edge.source_coords, edge.target_coords],
-            {
-                color: "#ef4444",
-                weight: weight,
-                opacity: opacity,
-                dashArray: "4, 4",
-            }
-        );
-
-        line.bindTooltip(
-            `Interference: ${edge.source_id} ↔ ${edge.target_id} (${Math.round(edge.distance_m)}m)`,
-            { sticky: true }
-        );
-
-        state.edgesLayer.addLayer(line);
-    });
-
-    const toggle = document.getElementById("toggle-edges");
-    if (toggle && !toggle.checked) {
-        if (state.map.hasLayer(state.edgesLayer)) {
-            state.map.removeLayer(state.edgesLayer);
-        }
-    } else {
-        if (!state.map.hasLayer(state.edgesLayer)) {
-            state.map.addLayer(state.edgesLayer);
-        }
+    if (state.map.hasLayer(state.edgesLayer)) {
+        state.map.removeLayer(state.edgesLayer);
     }
 }
 
 /**
- * Updates marker colors and popup details to reflect the chosen algorithm's coloring.
+ * Updates coverage circle fill colors and marker badges to reflect the chosen algorithm's coloring.
  */
 function applyActiveColoring() {
     if (!state.optimizationResults) return;
 
-    const algoKey = state.activeAlgorithm === "welsh_powell" ? "welsh_powell" : "dsatur";
+    const algoKey = getSelectedAlgoKey();
     const algoResult = state.optimizationResults[algoKey];
     if (!algoResult || !algoResult.coloring) return;
 
     const coloring = algoResult.coloring;
     const maxFreq = algoResult.color_count || 1;
 
-    // 1. Recolour each marker on the map with channel badges
+    // 1. Color each cell's coverage circle & marker on the map
     Object.entries(coloring).forEach(([towerId, freq]) => {
         const cell = state.cellsById[towerId];
         if (!cell) return;
 
         const channelNum = freq + 1;
-        const color = FREQUENCY_COLORS[freq % FREQUENCY_COLORS.length];
+        const color = getFrequencyColor(freq);
 
+        // Recolor coverage circle on geographic map
+        const covCircle = state.coverageCirclesById[towerId];
+        if (covCircle) {
+            covCircle.setStyle({
+                fill: true,
+                fillColor: color,
+                fillOpacity: 0.18,
+                color: color,
+                weight: 1.5,
+                opacity: 0.85,
+            });
+        }
+
+        // Recolor marker chip with stable label & channel badge
         const circleEl = document.getElementById(`marker-circle-${towerId}`);
         if (circleEl) {
             circleEl.style.backgroundColor = color;
-            circleEl.textContent = `f${channelNum}`;
-            circleEl.title = `Cell #${cell.cell_id} (Channel f${channelNum})`;
+            circleEl.style.borderColor = "#ffffff";
+            circleEl.innerHTML = `<span class="marker-label">${cell.label}</span><span class="marker-freq-sub">f${channelNum}</span>`;
+            circleEl.title = `Cell ${cell.label} (#${cell.cell_id}) — Channel f${channelNum}`;
         }
 
+        // Update popup card content
         const marker = state.markersById[towerId];
         if (marker && marker.getPopup()) {
-            const algoName = algoKey === "welsh_powell" ? "Welsh-Powell" : "DSATUR";
+            const algoName = algoKey === "welsh_powell" ? "Welsh-Powell" :
+                             algoKey === "exact" ? "Exact Optimal" : "DSATUR";
+            const isEstimated = Boolean(cell.is_range_estimated);
+            const radiusM = Math.max(50, Number(cell.range_m) || 800);
             const popupContent = `
                 <div class="tower-popup">
                     <div class="tower-popup-header">
-                        <span class="tower-popup-title">Cell #${cell.cell_id}</span>
+                        <span class="tower-popup-title">Cell ${cell.label} <small>(#${cell.cell_id})</small></span>
                         <span class="radio-badge">${cell.radio}</span>
                     </div>
                     <div class="tower-popup-details">
@@ -899,7 +1097,7 @@ function applyActiveColoring() {
                         <span class="label">Longitude:</span>
                         <span class="val">${cell.longitude.toFixed(5)}°</span>
                         <span class="label">Coverage:</span>
-                        <span class="val">${Math.round(cell.range_m)} m</span>
+                        <span class="val">${Math.round(radiusM)} m ${isEstimated ? '<small style="color:var(--accent-amber);">(Estimated)</small>' : ''}</span>
                         <span class="label">MCC / MNC:</span>
                         <span class="val">${cell.mcc ?? "—"} / ${cell.mnc ?? "—"}</span>
                         <span class="label">LAC:</span>
@@ -918,10 +1116,12 @@ function applyActiveColoring() {
     if (state.selectedTowerId && coloring[state.selectedTowerId] !== undefined) {
         const freq = coloring[state.selectedTowerId];
         const channelNum = freq + 1;
-        const color = FREQUENCY_COLORS[freq % FREQUENCY_COLORS.length];
+        const color = getFrequencyColor(freq);
         const freqBadge = document.getElementById("inspector-freq-badge");
         if (freqBadge) {
-            freqBadge.textContent = `Channel f${channelNum} (${algoKey === "welsh_powell" ? "Welsh-Powell" : "DSATUR"})`;
+            const algoName = algoKey === "welsh_powell" ? "Welsh-Powell" :
+                             algoKey === "exact" ? "Exact Optimal" : "DSATUR";
+            freqBadge.textContent = `Channel f${channelNum} (${algoName})`;
             freqBadge.style.color = color;
             freqBadge.style.borderColor = color;
         }
@@ -938,7 +1138,7 @@ function renderLegend(maxFreq, algoKey) {
 
     legendItems.innerHTML = "";
     for (let f = 1; f <= maxFreq; f++) {
-        const color = FREQUENCY_COLORS[(f - 1) % FREQUENCY_COLORS.length];
+        const color = getFrequencyColor(f - 1);
         const chip = document.createElement("div");
         chip.className = "legend-chip";
         chip.dataset.channel = f;
@@ -955,10 +1155,10 @@ function renderLegend(maxFreq, algoKey) {
 
 /**
  * Interactive frequency channel isolation:
- * Highlights towers assigned to channel `channelNum` and dims other towers.
+ * Highlights towers and coverage circles assigned to channel `channelNum` and dims others.
  */
 function isolateFrequency(channelNum) {
-    const algoKey = state.activeAlgorithm === "welsh_powell" ? "welsh_powell" : "dsatur";
+    const algoKey = getSelectedAlgoKey();
     const coloring = state.optimizationResults?.[algoKey]?.coloring;
     if (!coloring) return;
 
@@ -968,10 +1168,14 @@ function isolateFrequency(channelNum) {
         state.isolatedFrequency = null;
         chips.forEach((c) => c.classList.remove("active-isolate"));
 
-        Object.keys(coloring).forEach((towerId) => {
+        Object.entries(coloring).forEach(([towerId, freq]) => {
             const circleEl = document.getElementById(`marker-circle-${towerId}`);
-            if (circleEl) {
-                circleEl.classList.remove("dimmed-marker");
+            if (circleEl) circleEl.classList.remove("dimmed-marker");
+
+            const covCircle = state.coverageCirclesById[towerId];
+            if (covCircle) {
+                const color = getFrequencyColor(freq);
+                covCircle.setStyle({ fill: true, fillColor: color, fillOpacity: 0.18, color: color, opacity: 0.85, weight: 1.5 });
             }
         });
     } else {
@@ -986,12 +1190,23 @@ function isolateFrequency(channelNum) {
         });
 
         Object.entries(coloring).forEach(([towerId, freq]) => {
+            const isMatch = (freq + 1 === channelNum);
             const circleEl = document.getElementById(`marker-circle-${towerId}`);
             if (circleEl) {
-                if (freq + 1 === channelNum) {
+                if (isMatch) {
                     circleEl.classList.remove("dimmed-marker");
                 } else {
                     circleEl.classList.add("dimmed-marker");
+                }
+            }
+
+            const covCircle = state.coverageCirclesById[towerId];
+            if (covCircle) {
+                const color = getFrequencyColor(freq);
+                if (isMatch) {
+                    covCircle.setStyle({ fill: true, fillColor: color, fillOpacity: 0.32, color: color, opacity: 1.0, weight: 2.5 });
+                } else {
+                    covCircle.setStyle({ fill: true, fillColor: color, fillOpacity: 0.03, color: color, opacity: 0.15, weight: 0.5 });
                 }
             }
         });
@@ -1003,7 +1218,7 @@ function isolateFrequency(channelNum) {
 }
 
 /**
- * Resets optimization scoreboard metrics and hides legend.
+ * Resets optimization scoreboard metrics, exact solver indicators, and restores circles.
  */
 function resetOptimizationScoreboard() {
     const elEdges = document.getElementById("metric-edges");
@@ -1013,6 +1228,8 @@ function resetOptimizationScoreboard() {
     const elWpValid = document.getElementById("res-wp-valid");
     const elDsaturColors = document.getElementById("res-dsatur-colors");
     const elDsaturValid = document.getElementById("res-dsatur-valid");
+    const elExactColors = document.getElementById("res-exact-colors");
+    const elExactValid = document.getElementById("res-exact-valid");
     const legendContainer = document.getElementById("legend-container");
 
     if (elEdges) elEdges.textContent = "—";
@@ -1022,7 +1239,39 @@ function resetOptimizationScoreboard() {
     if (elWpValid) elWpValid.textContent = "—";
     if (elDsaturColors) elDsaturColors.textContent = "—";
     if (elDsaturValid) elDsaturValid.textContent = "—";
+    if (elExactColors) elExactColors.textContent = "—";
+    if (elExactValid) elExactValid.textContent = "—";
     if (legendContainer) legendContainer.style.display = "none";
+
+    ["pill-dsatur", "pill-wp", "pill-exact"].forEach((id) => {
+        document.getElementById(id)?.classList.remove("best-algo-pill");
+    });
+
+    // Reset coverage circles and markers
+    if (state.coverageCirclesById) {
+        Object.values(state.coverageCirclesById).forEach((circle) => {
+            circle.setStyle({
+                fill: false,
+                fillColor: "#3b82f6",
+                fillOpacity: 0.0,
+                color: "#64748b",
+                weight: 1.5,
+                opacity: 0.35,
+            });
+        });
+    }
+
+    if (state.cells) {
+        state.cells.forEach((cell) => {
+            const circleEl = document.getElementById(`marker-circle-${cell.tower_id}`);
+            if (circleEl) {
+                circleEl.style.backgroundColor = "var(--bg-surface)";
+                circleEl.style.borderColor = "#ffffff";
+                circleEl.innerHTML = `<span class="marker-label">${cell.label}</span>`;
+                circleEl.title = `Cell ${cell.label} (#${cell.cell_id})`;
+            }
+        });
+    }
 }
 
 /**
@@ -1054,7 +1303,7 @@ function renderGraphExplorer() {
         return;
     }
 
-    const algoKey = state.activeAlgorithm === "welsh_powell" ? "welsh_powell" : "dsatur";
+    const algoKey = getSelectedAlgoKey();
     const coloring = state.optimizationResults?.[algoKey]?.coloring || {};
 
     const nodeCoords = {};
@@ -1138,7 +1387,7 @@ function renderGraphExplorer() {
 
         const freq = coloring[cell.tower_id];
         const channelNum = freq !== undefined ? freq + 1 : null;
-        const color = channelNum !== null ? FREQUENCY_COLORS[freq % FREQUENCY_COLORS.length] : "#38bdf8";
+        const color = channelNum !== null ? getFrequencyColor(freq) : "#38bdf8";
 
         const isSelected = selectedId === cell.tower_id;
         const isDimmed = state.isolatedFrequency && channelNum !== state.isolatedFrequency;
@@ -1165,13 +1414,13 @@ function renderGraphExplorer() {
         ctx.strokeStyle = isSelected ? "#f59e0b" : "#ffffff";
         ctx.stroke();
 
-        // Node text label
-        if (pos.r >= 10 && channelNum !== null) {
+        // Node text label: stable alphabetic label
+        if (pos.r >= 9) {
             ctx.fillStyle = "#ffffff";
-            ctx.font = `bold ${Math.round(pos.r * 0.75)}px 'JetBrains Mono', monospace`;
+            ctx.font = `bold ${Math.round(pos.r * 0.72)}px 'JetBrains Mono', monospace`;
             ctx.textAlign = "center";
             ctx.textBaseline = "middle";
-            ctx.fillText(`f${channelNum}`, pos.x, pos.y);
+            ctx.fillText(cell.label, pos.x, pos.y);
         }
 
         ctx.restore();
@@ -1206,7 +1455,7 @@ function initGraphCanvasInteractions() {
         const node = getNodeAt(mouseX, mouseY);
         if (node) {
             canvas.style.cursor = "pointer";
-            const algoKey = state.activeAlgorithm === "welsh_powell" ? "welsh_powell" : "dsatur";
+            const algoKey = getSelectedAlgoKey();
             const coloring = state.optimizationResults?.[algoKey]?.coloring || {};
             const freq = coloring[node.cell.tower_id];
             const channelText = freq !== undefined ? `Channel f${freq + 1}` : "Unassigned";
@@ -1215,9 +1464,9 @@ function initGraphCanvasInteractions() {
             tooltip.style.left = `${mouseX + 15}px`;
             tooltip.style.top = `${mouseY + 15}px`;
             tooltip.innerHTML = `
-                <div style="font-weight: 700; color: var(--text-primary)">Cell #${node.cell.cell_id} <span style="font-size: 0.65rem; color: var(--accent-blue)">${node.cell.radio}</span></div>
+                <div style="font-weight: 700; color: var(--text-primary)">Cell ${node.cell.label} <small>(#${node.cell.cell_id})</small> <span style="font-size: 0.65rem; color: var(--accent-blue)">${node.cell.radio}</span></div>
                 <div style="font-size: 0.68rem; color: var(--accent-emerald)">${channelText}</div>
-                <div style="font-size: 0.64rem; color: var(--text-muted)">Range: ${Math.round(node.cell.range_m)}m</div>
+                <div style="font-size: 0.64rem; color: var(--text-muted)">Range: ${Math.round(node.cell.range_m)}m ${node.cell.is_range_estimated ? '(Est)' : ''}</div>
             `;
         } else {
             canvas.style.cursor = "default";

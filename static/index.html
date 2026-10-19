@@ -37,6 +37,7 @@
                     <span class="brand-tag">Frequency Allocation via Graph Coloring</span>
                 </div>
                 <span id="status-badge" class="badge badge-loading">Connecting...</span>
+                <span id="location-badge" class="badge badge-preset">Preset: South Delhi</span>
             </div>
 
             <!-- View Mode Switcher -->
@@ -77,6 +78,22 @@
 
         <!-- Main Workspace Canvas Area -->
         <main class="canvas-viewport">
+            <!-- Startup Geolocation Prompt Banner -->
+            <div id="geo-banner" class="geo-banner" style="display: none;">
+                <div class="geo-banner-content">
+                    <span class="geo-banner-icon">📍</span>
+                    <div class="geo-banner-text">
+                        <strong>Use Your Location?</strong>
+                        <span>SpectraMap can optimize cellular frequency reuse for live cell towers around your current GPS position.</span>
+                    </div>
+                    <div class="geo-banner-actions">
+                        <button id="btn-banner-allow" class="btn btn-sm btn-accent">Allow Location</button>
+                        <button id="btn-banner-preset" class="btn btn-sm btn-nav">Use South Delhi Demo</button>
+                        <button id="btn-banner-dismiss" class="btn-icon-only" title="Dismiss">✕</button>
+                    </div>
+                </div>
+            </div>
+
             <!-- 1. Leaflet Geographic Map View -->
             <div id="map" class="viewport-layer active-layer"></div>
 
@@ -147,9 +164,10 @@
                     <label for="algo-select" class="section-label">Coloring Heuristic</label>
                     <div class="input-wrapper">
                         <select id="algo-select" class="custom-select">
-                            <option value="both" selected>Dual Comparison (DSATUR & Welsh-Powell)</option>
+                            <option value="both" selected>Dual Comparison (DSATUR &amp; Welsh-Powell)</option>
                             <option value="dsatur">DSATUR (Dynamic Saturation Degree)</option>
                             <option value="welsh_powell">Welsh-Powell (Static Degree Ordering)</option>
+                            <option value="exact">Exact Minimum Solver (Branch &amp; Bound, N ≤ 25)</option>
                         </select>
                     </div>
                 </div>
@@ -167,14 +185,14 @@
                     <span class="section-label">Visual Overlays</span>
                     <div class="toggle-group">
                         <label class="toggle-switch">
-                            <input type="checkbox" id="toggle-halos" checked />
+                            <input type="checkbox" id="toggle-circles" checked />
                             <span class="toggle-track"></span>
-                            <span class="toggle-text">Coverage Radii (r<sub>i</sub>)</span>
+                            <span class="toggle-text">Coverage Circles</span>
                         </label>
                         <label class="toggle-switch">
-                            <input type="checkbox" id="toggle-edges" checked />
+                            <input type="checkbox" id="toggle-markers" checked />
                             <span class="toggle-track"></span>
-                            <span class="toggle-text">Interference Lines (d &le; r<sub>i</sub>+r<sub>j</sub>)</span>
+                            <span class="toggle-text">Cell Markers &amp; Labels</span>
                         </label>
                     </div>
                 </div>
@@ -261,15 +279,20 @@
 
                     <!-- Comparison Table Strip -->
                     <div class="comparison-strip">
+                        <div class="algo-pill" id="pill-dsatur">
+                            <span class="algo-name">DSATUR</span>
+                            <span class="algo-metric" id="res-dsatur-colors">—</span>
+                            <span class="algo-valid" id="res-dsatur-valid">—</span>
+                        </div>
                         <div class="algo-pill" id="pill-wp">
                             <span class="algo-name">Welsh-Powell</span>
                             <span class="algo-metric" id="res-wp-colors">—</span>
                             <span class="algo-valid" id="res-wp-valid">—</span>
                         </div>
-                        <div class="algo-pill" id="pill-dsatur">
-                            <span class="algo-name">DSATUR</span>
-                            <span class="algo-metric" id="res-dsatur-colors">—</span>
-                            <span class="algo-valid" id="res-dsatur-valid">—</span>
+                        <div class="algo-pill" id="pill-exact">
+                            <span class="algo-name">Exact (B&amp;B)</span>
+                            <span class="algo-metric" id="res-exact-colors">—</span>
+                            <span class="algo-valid" id="res-exact-valid">—</span>
                         </div>
                     </div>
 
