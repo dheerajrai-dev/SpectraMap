@@ -112,73 +112,192 @@
                 <span>Center: 28.52240°, 77.19060° (Click map to change)</span>
             </div>
 
-            <!-- Floating Left Control Panel Dock -->
-            <aside class="control-dock" id="control-dock">
+            <!-- Floating Left Control Panel Dock (5 Explicit Sections) -->
+            <aside class="control-dock" id="control-dock" aria-label="Analysis Control Panel">
                 <div class="dock-header">
                     <h2>Analysis Control</h2>
-                    <span class="dock-subtitle">Define scope & run heuristics</span>
+                    <span class="dock-subtitle">Geospatial spectrum allocation pipeline</span>
                 </div>
 
-                <div class="dock-section">
-                    <label for="preset-select" class="section-label">Location Preset</label>
+                <!-- SECTION 1: Location & Search Radius -->
+                <div class="dock-section" id="dock-sec-location">
+                    <div class="section-title-row">
+                        <span class="section-num">1</span>
+                        <label for="preset-select" class="section-label">Location &amp; Area</label>
+                    </div>
                     <div class="input-wrapper">
-                        <select id="preset-select" class="custom-select">
+                        <select id="preset-select" class="custom-select" aria-label="Select location preset">
                             <option value="custom" selected>🎯 Custom / Map Center</option>
                             <option value="south_delhi">📍 South Delhi (100+ Live Towers)</option>
                             <option value="connaught_place">📍 Connaught Place (New Delhi)</option>
                             <option value="mumbai">📍 Mumbai (Marine Lines)</option>
                         </select>
                     </div>
+                    <div class="coords-grid">
+                        <div class="coord-field">
+                            <label for="input-lat" class="coord-label">Latitude</label>
+                            <input type="number" id="input-lat" class="coord-input" step="0.0001" min="-90" max="90" value="28.5224" placeholder="28.5224" />
+                        </div>
+                        <div class="coord-field">
+                            <label for="input-lon" class="coord-label">Longitude</label>
+                            <input type="number" id="input-lon" class="coord-input" step="0.0001" min="-180" max="180" value="77.1906" placeholder="77.1906" />
+                        </div>
+                    </div>
+                    <div class="slider-wrapper" style="margin-top: 0.35rem;">
+                        <div class="slider-header">
+                            <label for="radius-slider" class="sub-label">Search Radius</label>
+                            <span class="slider-value"><span id="radius-label">1500</span> m</span>
+                        </div>
+                        <input type="range" id="radius-slider" min="500" max="3000" step="100" value="1500" aria-label="Search radius in metres" />
+                        <div class="slider-ticks">
+                            <span>500m</span>
+                            <span>1500m</span>
+                            <span>3000m</span>
+                        </div>
+                    </div>
                 </div>
 
-                <div class="dock-section">
-                    <div class="slider-header">
-                        <label for="radius-slider" class="section-label">Search Radius</label>
-                        <span class="slider-value"><span id="radius-label">1500</span> m</span>
+                <div class="dock-divider"></div>
+
+                <!-- SECTION 2: Radio Technologies Filter (4G & 5G Only) -->
+                <div class="dock-section" id="dock-sec-radio">
+                    <div class="section-title-row">
+                        <span class="section-num">2</span>
+                        <span class="section-label">Radio Technologies</span>
                     </div>
-                    <input
-                        type="range"
-                        id="radius-slider"
-                        min="500"
-                        max="3000"
-                        step="100"
-                        value="1500"
-                    />
-                    <div class="slider-ticks">
-                        <span>500m</span>
-                        <span>1500m</span>
-                        <span>3000m</span>
+                    <div class="tech-toggle-group">
+                        <label class="tech-checkbox-card" id="card-tech-4g">
+                            <input type="checkbox" id="check-tech-4g" value="4G" checked />
+                            <span class="tech-badge badge-4g">4G LTE</span>
+                            <span class="tech-desc">Bands 1/3/40</span>
+                        </label>
+                        <label class="tech-checkbox-card" id="card-tech-5g">
+                            <input type="checkbox" id="check-tech-5g" value="5G" checked />
+                            <span class="tech-badge badge-5g">5G NR</span>
+                            <span class="tech-desc">n78 Sub-6</span>
+                        </label>
+                    </div>
+                    <div id="tech-warning" class="tech-warning" style="display: none;" role="alert">
+                        ⚠️ Select at least one technology (4G or 5G) to analyze spectrum.
+                    </div>
+                    <!-- Co-located Tower Aggregation (<= 2m) -->
+                    <div class="site-aggregation-row" style="margin-top: 0.65rem; padding: 0.45rem 0.6rem; background: var(--bg-surface-elevated, rgba(255,255,255,0.03)); border-radius: 6px; border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));">
+                        <label class="custom-toggle-label" style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-size: 0.78rem; color: var(--text-secondary); margin: 0;">
+                            <input type="checkbox" id="check-aggregate-2m" checked />
+                            <span style="font-weight: 500;">Consolidate towers within 2m (Sites)</span>
+                        </label>
+                        <small class="dock-hint" style="display: block; margin-top: 0.2rem; font-size: 0.68rem; color: var(--text-muted); line-height: 1.2;">
+                            Treats co-located mast sectors (&le; 2m) as 1 physical tower
+                        </small>
                     </div>
                 </div>
 
-                <div class="dock-section">
-                    <div class="slider-header">
-                        <label for="override-slider" class="section-label">Coverage Radius Override</label>
-                        <span class="slider-value"><span id="override-label">Data Default</span></span>
+                <div class="dock-divider"></div>
+
+                <!-- SECTION 3: Dataset Size Limit & Accounting -->
+                <div class="dock-section" id="dock-sec-limit">
+                    <div class="section-title-row">
+                        <span class="section-num">3</span>
+                        <label for="limit-slider" class="section-label">Dataset Size &amp; Accounting</label>
                     </div>
-                    <input
-                        type="range"
-                        id="override-slider"
-                        min="0"
-                        max="2000"
-                        step="50"
-                        value="0"
-                    />
-                    <div class="slider-ticks">
-                        <span>Default</span>
-                        <span>1000m</span>
-                        <span>2000m</span>
+                    <div class="slider-wrapper">
+                        <div class="slider-header">
+                            <label for="limit-slider" class="sub-label">Max Tower Limit</label>
+                            <span class="slider-value"><span id="limit-label">50</span> towers</span>
+                        </div>
+                        <input type="range" id="limit-slider" min="10" max="200" step="5" value="50" aria-label="Maximum tower limit" />
+                        <div class="slider-ticks">
+                            <span>10</span>
+                            <span>50 (Def)</span>
+                            <span>100</span>
+                            <span>200</span>
+                        </div>
                     </div>
-                    <small class="dock-hint" style="display:block; font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;">0 = use observed cell ranges; &gt;0 = uniform radius sensitivity</small>
+                    <div class="accounting-grid">
+                        <div class="acc-card" title="Total raw cell records found within search area in OpenCellID">
+                            <span class="acc-label">Available</span>
+                            <span class="acc-val" id="acc-avail">—</span>
+                        </div>
+                        <div class="acc-card" title="Cell records matching active 4G/5G technology filter">
+                            <span class="acc-label">Eligible</span>
+                            <span class="acc-val" id="acc-elig">—</span>
+                        </div>
+                        <div class="acc-card acc-card-selected" title="Towers retained after deterministic spatial dispersion limit (|V|)">
+                            <span class="acc-label">Selected</span>
+                            <span class="acc-val" id="acc-sel">—</span>
+                        </div>
+                        <div class="acc-card acc-card-excluded" title="Records excluded due to technology filter or ceiling limit">
+                            <span class="acc-label">Excluded</span>
+                            <span class="acc-val" id="acc-excl">—</span>
+                        </div>
+                    </div>
                 </div>
 
-                <div class="dock-section">
-                    <div style="display: flex; gap: 8px;">
-                        <button id="btn-fetch" class="btn btn-primary" style="flex: 1;">
-                            <span class="btn-icon">📡</span> Fetch Towers
+                <div class="dock-divider"></div>
+
+                <!-- SECTION 4: Coverage Model & Sensitivity Override -->
+                <div class="dock-section" id="dock-sec-coverage">
+                    <div class="section-title-row">
+                        <span class="section-num">4</span>
+                        <label for="override-slider" class="section-label">Coverage Model</label>
+                    </div>
+                    <div class="range-summary-card" id="range-summary">
+                        <div class="range-summary-row">
+                            <span class="range-stat-title">Observed Radii:</span>
+                            <span class="range-stat-values">
+                                Min: <strong id="range-min">—</strong> |
+                                Med: <strong id="range-med">—</strong> |
+                                Max: <strong id="range-max">—</strong>
+                            </span>
+                        </div>
+                        <div class="range-stat-fallback">
+                            <small>Defaults: 4G=800m, 5G=500m (Clamped: 50m–10,000m)</small>
+                        </div>
+                    </div>
+                    <div class="slider-wrapper">
+                        <div class="slider-header">
+                            <label for="override-slider" class="sub-label">Uniform Radius Override</label>
+                            <span class="slider-value"><span id="override-label">Data Default</span></span>
+                        </div>
+                        <input type="range" id="override-slider" min="0" max="2000" step="50" value="0" aria-label="Uniform coverage radius override" />
+                        <div class="slider-ticks">
+                            <span>Data Default</span>
+                            <span>1000m</span>
+                            <span>2000m</span>
+                        </div>
+                        <small class="dock-hint">0 = use observed cell ranges; &gt;0 = uniform radius sensitivity</small>
+                    </div>
+                </div>
+
+                <div class="dock-divider"></div>
+
+                <!-- SECTION 5: Consolidated Pipeline Actions -->
+                <div class="dock-section" id="dock-sec-actions">
+                    <div class="section-title-row">
+                        <span class="section-num">5</span>
+                        <span class="section-label">Pipeline Actions</span>
+                    </div>
+                    <div class="input-wrapper" style="margin-bottom: 0.35rem;">
+                        <label for="algo-select" class="sub-label" style="font-size: 0.68rem; margin-bottom: 2px;">Coloring Algorithm</label>
+                        <select id="algo-select" class="custom-select" aria-label="Select coloring heuristic">
+                            <option value="both" selected>Dual Comparison (DSatur &amp; Welsh-Powell)</option>
+                            <option value="dsatur">DSatur (Dynamic Saturation Degree)</option>
+                            <option value="welsh_powell">Welsh-Powell (Static Degree Ordering)</option>
+                            <option value="exact">Exact Minimum Solver (Branch &amp; Bound, N ≤ 25)</option>
+                        </select>
+                    </div>
+                    <div class="actions-grid">
+                        <button id="btn-fetch" class="btn btn-primary" title="Fetch 4G/5G cell records within search area">
+                            <span class="btn-icon">📡</span> Fetch Records
                         </button>
-                        <button id="btn-build-graph" class="btn btn-secondary" style="flex: 1;" disabled title="Construct undirected interference graph">
+                        <button id="btn-build-graph" class="btn btn-secondary" disabled title="Construct interference graph from circular coverage overlap">
                             <span class="btn-icon">🕸️</span> Build Graph
+                        </button>
+                        <button id="btn-optimize" class="btn btn-accent" disabled title="Allocate non-conflicting frequency channels">
+                            <span class="btn-icon">⚡</span> Optimize Frequencies
+                        </button>
+                        <button id="btn-compare-action" class="btn btn-secondary" disabled title="Run side-by-side solver benchmark comparison">
+                            <span class="btn-icon">⚖️</span> Compare Both
                         </button>
                     </div>
                     <div id="cells-status" class="status-callout" aria-live="polite"></div>
@@ -186,31 +305,8 @@
 
                 <div class="dock-divider"></div>
 
-                <div class="dock-section">
-                    <label for="algo-select" class="section-label">Coloring Heuristic</label>
-                    <div class="input-wrapper">
-                        <select id="algo-select" class="custom-select">
-                            <option value="both" selected>Dual Comparison (DSATUR &amp; Welsh-Powell)</option>
-                            <option value="dsatur">DSATUR (Dynamic Saturation Degree)</option>
-                            <option value="welsh_powell">Welsh-Powell (Static Degree Ordering)</option>
-                            <option value="exact">Exact Minimum Solver (Branch &amp; Bound, N ≤ 25)</option>
-                        </select>
-                    </div>
-                </div>
-
-                <div class="dock-section" style="display: flex; flex-direction: column; gap: 8px;">
-                    <button id="btn-optimize" class="btn btn-accent btn-block" disabled>
-                        <span class="btn-icon">⚡</span> Optimize Frequencies
-                    </button>
-                    <button id="btn-compare-action" class="btn btn-secondary btn-block" disabled>
-                        <span class="btn-icon">⚖️</span> Compare Solvers
-                    </button>
-                </div>
-
-                <div class="dock-divider"></div>
-
-                <!-- Layer Overlays -->
-                <div class="dock-section">
+                <!-- Visual Layer Overlays -->
+                <div class="dock-section" id="dock-sec-overlays">
                     <span class="section-label">Visual Overlays</span>
                     <div class="toggle-group">
                         <label class="toggle-switch">
@@ -331,64 +427,82 @@
             </aside>
 
             <!-- Bottom Floating Analytics & Scoreboard Dock -->
-            <footer class="analytics-dock" id="analytics-dock">
-                <div class="analytics-strip">
-                    <!-- KPI Badges -->
-                    <div class="kpi-group">
-                        <div class="kpi-card" title="Total cell tower records currently in analysis">
-                            <span class="kpi-label">TOWERS (|V|)</span>
-                            <span class="kpi-val" id="metric-towers">—</span>
-                        </div>
-                        <div class="kpi-card" title="Interference edges where coverage circles overlap">
-                            <span class="kpi-label">CONFLICT EDGES (|E|)</span>
-                            <span class="kpi-val" id="metric-edges">—</span>
-                        </div>
-                        <div class="kpi-card" title="Maximum degree of any single vertex in the graph">
-                            <span class="kpi-label">MAX DEGREE (Δ)</span>
-                            <span class="kpi-val" id="metric-degree">—</span>
-                        </div>
-                        <div class="kpi-card" title="Graph density: 2|E| / (|V|(|V|-1))">
-                            <span class="kpi-label">DENSITY (ρ)</span>
-                            <span class="kpi-val" id="metric-density">—</span>
+            <footer class="analytics-dock" id="analytics-dock" role="region" aria-label="Results Analytics Dashboard">
+                <!-- Row 1: KPI Metrics Grid (8 Core Metrics) -->
+                <div class="kpi-grid" id="dashboard-kpi-grid">
+                    <!-- 1. Towers / Vertices |V| -->
+                    <div class="kpi-card" id="kpi-card-v" title="Total selected cell transceiver vertices in interference graph">
+                        <span class="kpi-label">TOWERS (|V|)</span>
+                        <span class="kpi-val" id="metric-towers">—</span>
+                    </div>
+                    <!-- 2. Conflict Edges |E| -->
+                    <div class="kpi-card" id="kpi-card-e" title="Interference edges where coverage circles overlap (d &le; r1 + r2)">
+                        <span class="kpi-label">CONFLICTS (|E|)</span>
+                        <span class="kpi-val" id="metric-edges">—</span>
+                    </div>
+                    <!-- 3. Maximum Degree Δ -->
+                    <div class="kpi-card" id="kpi-card-delta" title="Maximum vertex degree &Delta;(G)">
+                        <span class="kpi-label">MAX DEGREE (Δ)</span>
+                        <span class="kpi-val" id="metric-degree">—</span>
+                    </div>
+                    <!-- 4. Graph Density ρ -->
+                    <div class="kpi-card" id="kpi-card-density" title="Graph edge density: 2|E| / (|V|(|V|-1))">
+                        <span class="kpi-label">DENSITY (ρ)</span>
+                        <span class="kpi-val" id="metric-density">—</span>
+                    </div>
+                    <!-- 5. 4G/5G Breakdown Ratio -->
+                    <div class="kpi-card kpi-card-ratio" id="kpi-card-tech" title="Breakdown of 4G LTE vs 5G NR cell transceivers in active selection">
+                        <span class="kpi-label">TECH RATIO</span>
+                        <div class="kpi-val-ratio" id="metric-tech-ratio">
+                            <span class="badge-tech-4g" id="badge-ratio-4g">4G: —</span>
+                            <span class="ratio-sep">|</span>
+                            <span class="badge-tech-5g" id="badge-ratio-5g">5G: —</span>
                         </div>
                     </div>
-
-                    <!-- Comparison Table Strip -->
-                    <div class="comparison-strip">
-                        <div class="algo-pill" id="pill-dsatur">
-                            <span class="algo-name">DSATUR</span>
-                            <span class="algo-metric" id="res-dsatur-colors">—</span>
-                            <span class="algo-valid" id="res-dsatur-valid">—</span>
-                        </div>
-                        <div class="algo-pill" id="pill-wp">
-                            <span class="algo-name">Welsh-Powell</span>
-                            <span class="algo-metric" id="res-wp-colors">—</span>
-                            <span class="algo-valid" id="res-wp-valid">—</span>
-                        </div>
-                        <div class="algo-pill" id="pill-exact">
-                            <span class="algo-name">Exact (B&amp;B)</span>
-                            <span class="algo-metric" id="res-exact-colors">—</span>
-                            <span class="algo-valid" id="res-exact-valid">—</span>
-                        </div>
-                        <button id="btn-open-compare" class="btn btn-secondary btn-sm btn-compare" title="Open comprehensive side-by-side solver benchmark and theoretical analysis">
-                            <span class="btn-icon">⚖️</span> Compare Solvers
-                        </button>
+                    <!-- 6. Colors Used (k) -->
+                    <div class="kpi-card" id="kpi-card-colors" title="Discrete frequency channels allocated by active solver">
+                        <span class="kpi-label">COLORS USED (k)</span>
+                        <span class="kpi-val" id="metric-colors">—</span>
                     </div>
-
-                    <!-- Legal Attribution -->
-                    <div class="attribution-block">
-                        <span>Data: <a href="https://opencellid.org" target="_blank" rel="noopener">OpenCellID</a> (ODbL)</span>
-                        <span>Tiles: © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OSM</a></span>
+                    <!-- 7. Solver Runtime (ms) -->
+                    <div class="kpi-card" id="kpi-card-runtime" title="Active solver optimization execution runtime in milliseconds">
+                        <span class="kpi-label">RUNTIME (ms)</span>
+                        <span class="kpi-val" id="metric-runtime">—</span>
+                    </div>
+                    <!-- 8. Independent Validation Status Badge -->
+                    <div class="kpi-card kpi-card-validation" id="kpi-card-validation" title="Independent 100% edge conflict and vertex completeness verification">
+                        <span class="kpi-label">VALIDATION</span>
+                        <div class="validation-status-wrap">
+                            <span class="badge-validation badge-val-waiting" id="metric-validation-badge">Awaiting Run</span>
+                        </div>
                     </div>
                 </div>
 
-                <!-- Frequency Channel Palette Legend Strip -->
-                <div id="legend-container" class="legend-strip" style="display: none;">
+                <!-- Row 2: Embedded Side-by-Side Comparison Card -->
+                <div class="dashboard-compare-card" id="dashboard-compare-card" aria-label="Heuristic Solver Comparison">
+                    <!-- Rendered via JS renderEmbeddedComparisonCard() -->
+                </div>
+
+                <!-- Row 3: Frequency Channel Palette Legend Strip -->
+                <div id="legend-container" class="legend-strip" style="display: none;" role="toolbar" aria-label="Allocated Frequency Channels">
                     <div class="legend-header">
-                        <span class="legend-title">ALLOCATED FREQUENCY CHANNELS:</span>
-                        <small class="legend-hint">Click a channel to filter</small>
+                        <div class="legend-header-left">
+                            <span class="legend-title">ALLOCATED FREQUENCY CHANNELS:</span>
+                            <small class="legend-hint" id="legend-hint">Click a channel to isolate towers on map and graph</small>
+                        </div>
+                        <button id="btn-clear-isolate" class="btn btn-xs btn-clear-isolate" style="display: none;" title="Reset channel isolation and restore full view">
+                            ✕ Clear Isolation
+                        </button>
                     </div>
-                    <div id="legend-items" class="legend-items"></div>
+                    <div id="legend-items" class="legend-items" role="group" aria-label="Frequency channel filter chips"></div>
+                </div>
+
+                <!-- Row 4: Attribution & Footer -->
+                <div class="analytics-footer">
+                    <div class="attribution-block">
+                        <span>Data: <a href="https://opencellid.org" target="_blank" rel="noopener">OpenCellID</a> (ODbL)</span>
+                        <span>Tiles: © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a></span>
+                    </div>
                 </div>
             </footer>
         </main>

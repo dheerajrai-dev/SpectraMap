@@ -18,19 +18,34 @@ const state = {
     searchCircle: null,
     currentCenter: { lat: 28.5224, lon: 77.1906 }, // Default: South Delhi (dense cellular cluster)
     radiusMetres: 1500,
-    cells: [],
+    cells: [],                   // Active working cell records (post-filter & post-limit)
+    rawFetchedCells: [],         // All cell records from last API fetch (unfiltered pool)
+    eligibleCells: [],           // Records matching 4G/5G technology filter
+    selectedRadios: ["4G", "5G"],// Active radio technologies
+    recordLimit: 50,             // Max tower ceiling (10-200)
+    accounting: {
+        available_count: 0,
+        eligible_count: 0,
+        selected_count: 0,
+        excluded_count: 0,
+    },
     cellsById: {},
     markersById: {},
+    coverageCirclesById: {},
     interferenceEdges: [],
+    adjacencyMap: new Map(),     // tower_id -> Array<{ id, dist, threshold, rule }>
+    neighborSets: new Map(),     // tower_id -> Set<neighbor_tower_id>
     optimizationResults: null,
     activeAlgorithm: "both",
     activeView: "map",
     selectedTowerId: null,
     isolatedFrequency: null,
     coverageRadiusOverride: 0,
+    aggregate2m: true,
     cellMarkersLayer: null,
     coverageCirclesLayer: null,
     edgesLayer: null,
+    graphNodePositions: {},
 };
 
 // Comprehensive frequency color palette with dynamic generator for arbitrary k
@@ -170,12 +185,18 @@ function updateCenterVisuals(lat, lon) {
 /**
  * Sets a new search center and re-draws center visuals.
  */
-function setNewCenter(lat, lon) {
+function setNewCenter(lat, lon, updateInputs = true) {
     state.currentCenter = { lat: Number(lat.toFixed(6)), lon: Number(lon.toFixed(6)) };
     updateCenterVisuals(lat, lon);
     const overlay = document.getElementById("map-overlay");
     if (overlay) {
-        overlay.innerHTML = `<span>Center: ${state.currentCenter.lat.toFixed(5)}°, ${state.currentCenter.lon.toFixed(5)}° (Click 'Fetch Cell Records')</span>`;
+        overlay.innerHTML = `<span>Center: ${state.currentCenter.lat.toFixed(5)}°, ${state.currentCenter.lon.toFixed(5)}° (Click 'Fetch Records')</span>`;
+    }
+    if (updateInputs) {
+        const inputLat = document.getElementById("input-lat");
+        const inputLon = document.getElementById("input-lon");
+        if (inputLat) inputLat.value = state.currentCenter.lat.toFixed(5);
+        if (inputLon) inputLon.value = state.currentCenter.lon.toFixed(5);
     }
 }
 
@@ -183,7 +204,24 @@ function setNewCenter(lat, lon) {
  * Hooks up UI event listeners (slider, buttons, checkboxes, dropdowns, tabs).
  */
 function initControls() {
-    // Radius slider
+    // Section 1: Coordinate numeric inputs
+    const inputLat = document.getElementById("input-lat");
+    const inputLon = document.getElementById("input-lon");
+    const handleCoordInput = () => {
+        const lat = parseFloat(inputLat?.value);
+        const lon = parseFloat(inputLon?.value);
+        if (!isNaN(lat) && !isNaN(lon) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180) {
+            setNewCenter(lat, lon, false);
+            state.map.setView([lat, lon], state.map.getZoom());
+            const presetSelect = document.getElementById("preset-select");
+            if (presetSelect) presetSelect.value = "custom";
+            updateLocationMode("manual");
+        }
+    };
+    if (inputLat) inputLat.addEventListener("change", handleCoordInput);
+    if (inputLon) inputLon.addEventListener("change", handleCoordInput);
+
+    // Section 1: Radius slider
     const radiusSlider = document.getElementById("radius-slider");
     const radiusLabel = document.getElementById("radius-label");
     if (radiusSlider && radiusLabel) {
@@ -196,14 +234,14 @@ function initControls() {
         });
     }
 
-    // Popular Presets dropdown
+    // Section 1: Popular Presets dropdown
     const presetSelect = document.getElementById("preset-select");
     if (presetSelect) {
         presetSelect.addEventListener("change", (e) => {
             const val = e.target.value;
             if (val !== "custom" && PRESET_LOCATIONS[val]) {
                 const loc = PRESET_LOCATIONS[val];
-                setNewCenter(loc.lat, loc.lon);
+                setNewCenter(loc.lat, loc.lon, true);
                 state.map.setView([loc.lat, loc.lon], 14);
                 updateLocationMode("preset", loc.name);
                 fetchNearbyCells();
@@ -211,37 +249,57 @@ function initControls() {
         });
     }
 
-    // "My GPS Location" button (HTML5 Geolocation)
-    const btnLocate = document.getElementById("btn-locate");
-    if (btnLocate) {
-        btnLocate.addEventListener("click", handleGeolocation);
+    // Section 2: Radio Technology Checkbox Cards
+    const chk4g = document.getElementById("check-tech-4g");
+    const chk5g = document.getElementById("check-tech-5g");
+    const techWarning = document.getElementById("tech-warning");
+    const handleTechChange = () => {
+        const radios = [];
+        if (chk4g && chk4g.checked) radios.push("4G");
+        if (chk5g && chk5g.checked) radios.push("5G");
+        state.selectedRadios = radios;
+
+        if (radios.length === 0) {
+            if (techWarning) techWarning.style.display = "block";
+            setPipelineButtonsDisabled(true, true, true, true);
+            return;
+        } else {
+            if (techWarning) techWarning.style.display = "none";
+            setPipelineButtonsDisabled(false, state.cells.length === 0, state.cells.length === 0, state.cells.length === 0);
+        }
+
+        // Dynamic in-memory filtering if towers are already loaded
+        if (state.rawFetchedCells && state.rawFetchedCells.length > 0) {
+            applyClientSideRadioFilter();
+        }
+    };
+    if (chk4g) chk4g.addEventListener("change", handleTechChange);
+    if (chk5g) chk5g.addEventListener("change", handleTechChange);
+
+    const chkAgg2m = document.getElementById("check-aggregate-2m");
+    if (chkAgg2m) {
+        chkAgg2m.addEventListener("change", (e) => {
+            state.aggregate2m = e.target.checked;
+            if (state.cells && state.cells.length > 0) {
+                fetchNearbyCells();
+            }
+        });
     }
 
-    // "Demo Grid" button (Generates simulated towers anywhere)
-    const btnDemo = document.getElementById("btn-demo");
-    if (btnDemo) {
-        btnDemo.addEventListener("click", loadDemoTowers);
+    // Section 3: Dataset Limit Slider
+    const limitSlider = document.getElementById("limit-slider");
+    const limitLabel = document.getElementById("limit-label");
+    if (limitSlider && limitLabel) {
+        limitSlider.addEventListener("input", (e) => {
+            state.recordLimit = Number(e.target.value);
+            limitLabel.textContent = state.recordLimit;
+            if (state.eligibleCells && state.eligibleCells.length > 0) {
+                applyClientSideLimitSlicing();
+            }
+        });
     }
 
-    // "Fetch Nearby Towers" button
-    const btnFetch = document.getElementById("btn-fetch");
-    if (btnFetch) {
-        btnFetch.addEventListener("click", fetchNearbyCells);
-    }
-
-    // "Build Interference Graph" button
-    const btnBuildGraph = document.getElementById("btn-build-graph");
-    if (btnBuildGraph) {
-        btnBuildGraph.addEventListener("click", () => buildInterferenceGraphUI(true));
-    }
-
-    // "Compare Solvers" direct action button
-    const btnCompareAction = document.getElementById("btn-compare-action");
-    if (btnCompareAction) {
-        btnCompareAction.addEventListener("click", () => runComparisonDirectly());
-    }
-
-    // Coverage Radius Override slider
+    // Section 4: Coverage Radius Override slider
     const overrideSlider = document.getElementById("override-slider");
     const overrideLabel = document.getElementById("override-label");
     if (overrideSlider && overrideLabel) {
@@ -257,13 +315,39 @@ function initControls() {
         });
     }
 
-    // "Optimize Frequencies" button
+    // Section 5: Consolidated Pipeline Action Buttons
+    const btnFetch = document.getElementById("btn-fetch");
+    if (btnFetch) {
+        btnFetch.addEventListener("click", fetchNearbyCells);
+    }
+
+    const btnBuildGraph = document.getElementById("btn-build-graph");
+    if (btnBuildGraph) {
+        btnBuildGraph.addEventListener("click", () => buildInterferenceGraphUI(true));
+    }
+
     const btnOptimize = document.getElementById("btn-optimize");
     if (btnOptimize) {
         btnOptimize.addEventListener("click", runFrequencyOptimization);
     }
 
-    // Toggle coverage circles
+    const btnCompareAction = document.getElementById("btn-compare-action");
+    if (btnCompareAction) {
+        btnCompareAction.addEventListener("click", () => runComparisonDirectly());
+    }
+
+    // Navbar Quick Actions: "My GPS Location" & "Demo Grid"
+    const btnLocate = document.getElementById("btn-locate");
+    if (btnLocate) {
+        btnLocate.addEventListener("click", handleGeolocation);
+    }
+
+    const btnDemo = document.getElementById("btn-demo");
+    if (btnDemo) {
+        btnDemo.addEventListener("click", loadDemoTowers);
+    }
+
+    // Visual Layer Overlays
     const toggleCircles = document.getElementById("toggle-circles");
     if (toggleCircles) {
         toggleCircles.addEventListener("change", (e) => {
@@ -279,7 +363,6 @@ function initControls() {
         });
     }
 
-    // Toggle cell markers & labels
     const toggleMarkers = document.getElementById("toggle-markers");
     if (toggleMarkers) {
         toggleMarkers.addEventListener("change", (e) => {
@@ -295,7 +378,6 @@ function initControls() {
         });
     }
 
-    // Toggle interference edges
     const toggleEdges = document.getElementById("toggle-edges");
     if (toggleEdges) {
         toggleEdges.addEventListener("change", (e) => {
@@ -322,35 +404,22 @@ function initControls() {
         });
     }
 
-    // View Switcher (Map View vs Graph Topology)
+    // View Switcher (Map View vs Graph Topology) & Keyboard Arrow Navigation
     const tabMapView = document.getElementById("tab-map-view");
     const tabGraphView = document.getElementById("tab-graph-view");
-    const mapLayer = document.getElementById("map");
-    const graphLayer = document.getElementById("graph-canvas-container");
+    if (tabMapView) tabMapView.addEventListener("click", () => switchVisualizationView("map"));
+    if (tabGraphView) tabGraphView.addEventListener("click", () => switchVisualizationView("graph"));
 
-    if (tabMapView && tabGraphView) {
-        tabMapView.addEventListener("click", () => {
-            tabMapView.classList.add("active");
-            tabMapView.setAttribute("aria-selected", "true");
-            tabGraphView.classList.remove("active");
-            tabGraphView.setAttribute("aria-selected", "false");
-            if (mapLayer) mapLayer.classList.add("active-layer");
-            if (graphLayer) graphLayer.classList.remove("active-layer");
-            state.activeView = "map";
-            setTimeout(() => state.map.invalidateSize(), 50);
+    [tabMapView, tabGraphView].forEach((tab) => {
+        tab?.addEventListener("keydown", (e) => {
+            if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+                e.preventDefault();
+                const target = tab === tabMapView ? tabGraphView : tabMapView;
+                target?.focus();
+                target?.click();
+            }
         });
-
-        tabGraphView.addEventListener("click", () => {
-            tabGraphView.classList.add("active");
-            tabGraphView.setAttribute("aria-selected", "true");
-            tabMapView.classList.remove("active");
-            tabMapView.setAttribute("aria-selected", "false");
-            if (graphLayer) graphLayer.classList.add("active-layer");
-            if (mapLayer) mapLayer.classList.remove("active-layer");
-            state.activeView = "graph";
-            renderGraphExplorer();
-        });
-    }
+    });
 
     // Close Inspector button
     const btnCloseInspector = document.getElementById("btn-close-inspector");
@@ -359,6 +428,26 @@ function initControls() {
             closeVertexInspector();
         });
     }
+
+    // Global Escape key listener to close inspector
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && state.selectedTowerId) {
+            closeVertexInspector();
+        }
+    });
+
+    // Debounced window resize listener for Canvas and Leaflet
+    let resizeTimer = null;
+    window.addEventListener("resize", () => {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+            if (state.activeView === "graph") {
+                renderGraphExplorer();
+            } else if (state.map) {
+                state.map.invalidateSize();
+            }
+        }, 120);
+    });
 
     // Educational Guide Modal
     const btnGuide = document.getElementById("btn-guide");
@@ -407,24 +496,727 @@ function initControls() {
         });
     }
 
-    // Clicking algorithm pills opens comparison modal
-    ["pill-dsatur", "pill-wp", "pill-exact"].forEach((id) => {
-        const pill = document.getElementById(id);
-        if (pill) {
-            pill.style.cursor = "pointer";
-            pill.setAttribute("title", "Click to open side-by-side solver comparison & theoretical bounds");
-            pill.addEventListener("click", () => {
-                if (compareModal) {
-                    renderCompareModalContent();
-                    compareModal.classList.add("open");
-                    compareModal.setAttribute("aria-hidden", "false");
-                }
-            });
+    // Initialize interactive Graph Topology Canvas handlers
+    initGraphCanvasInteractions();
+
+    // Initial render of empty accounting display and range stats
+    updateAccountingDisplay(state.accounting);
+    updateRangeStatsDisplay(state.cells);
+    updateDashboardMetrics(null, null, null, state.cells);
+    renderEmbeddedComparisonCard();
+}
+
+/**
+ * Centralized state helper for pipeline buttons.
+ */
+function setPipelineButtonsDisabled(fetchDis, buildDis, optDis, compDis) {
+    const btnFetch = document.getElementById("btn-fetch");
+    const btnBuild = document.getElementById("btn-build-graph");
+    const btnOpt = document.getElementById("btn-optimize");
+    const btnComp = document.getElementById("btn-compare-action");
+
+    if (btnFetch) btnFetch.disabled = fetchDis;
+    if (btnBuild) btnBuild.disabled = buildDis;
+    if (btnOpt) btnOpt.disabled = optDis;
+    if (btnComp) btnComp.disabled = compDis;
+}
+
+/**
+ * Switches between Geographic Map and Graph Topology views without state loss.
+ */
+function switchVisualizationView(viewName) {
+    const tabMapView = document.getElementById("tab-map-view");
+    const tabGraphView = document.getElementById("tab-graph-view");
+    const mapLayer = document.getElementById("map");
+    const graphLayer = document.getElementById("graph-canvas-container");
+
+    if (viewName === "map") {
+        tabMapView?.classList.add("active");
+        tabMapView?.setAttribute("aria-selected", "true");
+        tabGraphView?.classList.remove("active");
+        tabGraphView?.setAttribute("aria-selected", "false");
+
+        if (mapLayer) mapLayer.classList.add("active-layer");
+        if (graphLayer) graphLayer.classList.remove("active-layer");
+
+        state.activeView = "map";
+        setTimeout(() => {
+            if (state.map) state.map.invalidateSize();
+        }, 60);
+    } else if (viewName === "graph") {
+        tabGraphView?.classList.add("active");
+        tabGraphView?.setAttribute("aria-selected", "true");
+        tabMapView?.classList.remove("active");
+        tabMapView?.setAttribute("aria-selected", "false");
+
+        if (graphLayer) graphLayer.classList.add("active-layer");
+        if (mapLayer) mapLayer.classList.remove("active-layer");
+
+        state.activeView = "graph";
+        requestAnimationFrame(() => {
+            renderGraphExplorer();
+        });
+    }
+}
+
+/**
+ * Builds an in-memory graph adjacency index from the edges array.
+ * Runs in O(|E|) time; enables O(1) neighbor lookups and existence tests.
+ */
+function buildGraphAdjacencyIndex(edges) {
+    state.adjacencyMap.clear();
+    state.neighborSets.clear();
+
+    if (state.cells && Array.isArray(state.cells)) {
+        state.cells.forEach((cell) => {
+            state.adjacencyMap.set(cell.tower_id, []);
+            state.neighborSets.set(cell.tower_id, new Set());
+        });
+    }
+
+    if (!edges || !Array.isArray(edges)) return;
+
+    edges.forEach((edge) => {
+        const u = edge.source_id || edge.source;
+        const v = edge.target_id || edge.target;
+        if (!u || !v) return;
+
+        if (!state.adjacencyMap.has(u)) state.adjacencyMap.set(u, []);
+        if (!state.adjacencyMap.has(v)) state.adjacencyMap.set(v, []);
+        if (!state.neighborSets.has(u)) state.neighborSets.set(u, new Set());
+        if (!state.neighborSets.has(v)) state.neighborSets.set(v, new Set());
+
+        state.adjacencyMap.get(u).push({ id: v, dist: edge.distance_m, threshold: edge.threshold_m, rule: edge.rule });
+        state.adjacencyMap.get(v).push({ id: u, dist: edge.distance_m, threshold: edge.threshold_m, rule: edge.rule });
+        state.neighborSets.get(u).add(v);
+        state.neighborSets.get(v).add(u);
+    });
+}
+
+/**
+ * Synchronizes all Leaflet Map visual elements (markers, coverage circles, edge polylines)
+ * based on current selection and channel isolation states.
+ */
+function updateMapVisualStyles() {
+    const selectedId = state.selectedTowerId;
+    const neighborSet = selectedId ? state.neighborSets.get(selectedId) || new Set() : null;
+    const isolatedFreq = state.isolatedFrequency;
+    const algoKey = getSelectedAlgoKey();
+    const coloring = state.optimizationResults?.[algoKey]?.coloring || {};
+
+    // 1. Synchronize Markers & Coverage Circles
+    state.cells.forEach((cell) => {
+        const tid = cell.tower_id;
+        const markerEl = document.getElementById(`marker-circle-${tid}`);
+        const covCircle = state.coverageCirclesById?.[tid];
+        const freq = coloring[tid];
+        const channelNum = freq !== undefined ? freq + 1 : null;
+        const color = channelNum !== null ? getFrequencyColor(freq) : "#64748b";
+
+        const isSelected = selectedId === tid;
+        const isNeighbor = neighborSet ? neighborSet.has(tid) : false;
+        const isMatchIsolated = isolatedFreq ? channelNum === isolatedFreq : true;
+
+        if (markerEl) {
+            markerEl.classList.remove("selected-marker", "neighbor-marker", "dimmed-marker");
+
+            if (isSelected) {
+                markerEl.classList.add("selected-marker");
+            } else if (isNeighbor) {
+                markerEl.classList.add("neighbor-marker");
+            } else if ((selectedId && !isNeighbor) || (isolatedFreq && !isMatchIsolated)) {
+                markerEl.classList.add("dimmed-marker");
+            }
+        }
+
+        if (covCircle) {
+            if (isSelected) {
+                covCircle.setStyle({
+                    fill: true,
+                    fillColor: color,
+                    fillOpacity: 0.38,
+                    color: "#f59e0b",
+                    opacity: 1.0,
+                    weight: 3.5,
+                });
+                covCircle.bringToFront();
+            } else if (isNeighbor) {
+                covCircle.setStyle({
+                    fill: true,
+                    fillColor: color,
+                    fillOpacity: 0.24,
+                    color: "#38bdf8",
+                    opacity: 0.90,
+                    weight: 2.2,
+                });
+            } else if ((selectedId && !isNeighbor) || (isolatedFreq && !isMatchIsolated)) {
+                covCircle.setStyle({
+                    fill: true,
+                    fillColor: color,
+                    fillOpacity: 0.03,
+                    color: color,
+                    opacity: 0.15,
+                    weight: 0.6,
+                });
+            } else {
+                // Normal default display
+                const hasColoring = freq !== undefined;
+                covCircle.setStyle({
+                    fill: hasColoring,
+                    fillColor: color,
+                    fillOpacity: hasColoring ? 0.18 : 0.0,
+                    color: hasColoring ? color : "#64748b",
+                    opacity: hasColoring ? 0.85 : 0.35,
+                    weight: 1.5,
+                });
+            }
         }
     });
 
-    // Initialize interactive Graph Topology Canvas handlers
-    initGraphCanvasInteractions();
+    // 2. Synchronize Map Edges
+    if (state.edgesLayer) {
+        state.edgesLayer.eachLayer((layer) => {
+            if (!layer.edgeData) return;
+            const u = layer.edgeData.source_id || layer.edgeData.source;
+            const v = layer.edgeData.target_id || layer.edgeData.target;
+            const isIncident = selectedId && (u === selectedId || v === selectedId);
+
+            if (isIncident) {
+                layer.setStyle({
+                    color: "#f59e0b",
+                    weight: 3.5,
+                    opacity: 1.0,
+                    dashArray: null,
+                });
+                layer.bringToFront();
+            } else if (selectedId) {
+                layer.setStyle({
+                    color: "rgba(239, 68, 68, 0.12)",
+                    weight: 0.8,
+                    opacity: 0.18,
+                    dashArray: "3, 3",
+                });
+            } else if (isolatedFreq) {
+                const uFreq = coloring[u];
+                const vFreq = coloring[v];
+                const bothIsolated = (uFreq !== undefined && uFreq + 1 === isolatedFreq) && (vFreq !== undefined && vFreq + 1 === isolatedFreq);
+                if (bothIsolated) {
+                    layer.setStyle({
+                        color: getFrequencyColor(uFreq),
+                        weight: 2.2,
+                        opacity: 0.85,
+                        dashArray: null,
+                    });
+                } else {
+                    layer.setStyle({
+                        color: "rgba(239, 68, 68, 0.06)",
+                        weight: 0.6,
+                        opacity: 0.10,
+                        dashArray: "3, 3",
+                    });
+                }
+            } else {
+                layer.setStyle({
+                    color: "rgba(239, 68, 68, 0.45)",
+                    weight: 1.8,
+                    opacity: 0.75,
+                    dashArray: "4, 4",
+                });
+            }
+        });
+    }
+}
+
+/**
+ * Calculates continuous adaptive opacity and stroke width for Canvas edges.
+ */
+function getAdaptiveEdgeStyle(edgeCount, isIncident, isSelectedMode, isIsolationMode, bothIsolated) {
+    if (isIncident) {
+        return { strokeStyle: "rgba(245, 158, 11, 0.95)", lineWidth: 2.6 };
+    }
+    if (isSelectedMode) {
+        return { strokeStyle: "rgba(239, 68, 68, 0.06)", lineWidth: 0.5 };
+    }
+    if (isIsolationMode) {
+        if (bothIsolated) {
+            return { strokeStyle: "rgba(56, 189, 248, 0.75)", lineWidth: 1.8 };
+        }
+        return { strokeStyle: "rgba(239, 68, 68, 0.03)", lineWidth: 0.4 };
+    }
+
+    // Smooth continuous power-law decay based on |E|
+    const count = Math.max(1, edgeCount);
+    const alpha = Math.min(0.50, Math.max(0.03, 3.2 / Math.sqrt(count)));
+    const width = Math.min(1.8, Math.max(0.4, 1.8 - 0.45 * Math.log10(count)));
+
+    return {
+        strokeStyle: `rgba(239, 68, 68, ${alpha.toFixed(3)})`,
+        lineWidth: Number(width.toFixed(2)),
+    };
+}
+
+/**
+ * Filters cached raw records in memory by selected radio technologies.
+ */
+function applyClientSideRadioFilter() {
+    state.eligibleCells = state.rawFetchedCells.filter((c) => {
+        const r = (c.radio || "").toUpperCase();
+        return state.selectedRadios.some((tech) => r.includes(tech));
+    });
+    state.cells = state.eligibleCells.slice(0, state.recordLimit);
+
+    state.accounting.eligible_count = state.eligibleCells.length;
+    state.accounting.selected_count = state.cells.length;
+    state.accounting.excluded_count = state.accounting.available_count - state.cells.length;
+    updateAccountingDisplay(state.accounting);
+
+    renderCellTowers(state.cells);
+    updateRangeStatsDisplay(state.cells);
+    resetOptimizationScoreboard();
+
+    const statusMsg = document.getElementById("cells-status");
+    if (statusMsg) {
+        statusMsg.textContent = `Filtered to ${state.cells.length} towers (${state.selectedRadios.join(" + ")}). Click 'Build Graph' to recompute interference.`;
+        statusMsg.style.color = "var(--text-secondary)";
+    }
+    setPipelineButtonsDisabled(false, state.cells.length === 0, true, true);
+}
+
+/**
+ * Dynamically adjusts retained records to the new limit slider value without network round-trips.
+ */
+function applyClientSideLimitSlicing() {
+    state.cells = state.eligibleCells.slice(0, state.recordLimit);
+    state.accounting.selected_count = state.cells.length;
+    state.accounting.excluded_count = state.accounting.available_count - state.cells.length;
+    updateAccountingDisplay(state.accounting);
+
+    renderCellTowers(state.cells);
+    updateRangeStatsDisplay(state.cells);
+    resetOptimizationScoreboard();
+
+    const statusMsg = document.getElementById("cells-status");
+    if (statusMsg) {
+        statusMsg.textContent = `Tower limit set to ${state.recordLimit} (selected ${state.cells.length} records). Click 'Build Graph' to recompute edges.`;
+        statusMsg.style.color = "var(--text-secondary)";
+    }
+    setPipelineButtonsDisabled(false, state.cells.length === 0, true, true);
+}
+
+/**
+ * Updates the 4 accounting badge elements in Section 3.
+ */
+function updateAccountingDisplay(acc) {
+    const elAvail = document.getElementById("acc-avail");
+    const elElig = document.getElementById("acc-elig");
+    const elSel = document.getElementById("acc-sel");
+    const elExcl = document.getElementById("acc-excl");
+
+    if (elAvail) elAvail.textContent = acc?.available_count ?? "—";
+    if (elElig) elElig.textContent = acc?.eligible_count ?? "—";
+    if (elSel) elSel.textContent = acc?.selected_count ?? "—";
+    if (elExcl) elExcl.textContent = acc?.excluded_count ?? "—";
+}
+
+/**
+ * Calculates and renders min, median, and max observed coverage radii across active cell towers.
+ */
+function updateRangeStatsDisplay(cells) {
+    const elMin = document.getElementById("range-min");
+    const elMed = document.getElementById("range-med");
+    const elMax = document.getElementById("range-max");
+
+    if (!cells || cells.length === 0) {
+        if (elMin) elMin.textContent = "—";
+        if (elMed) elMed.textContent = "—";
+        if (elMax) elMax.textContent = "—";
+        return;
+    }
+
+    const ranges = cells
+        .map((c) => Number(c.range_m) || ((c.radio || "").includes("5G") ? 500 : 800))
+        .sort((a, b) => a - b);
+
+    const min = ranges[0];
+    const med = ranges[Math.floor(ranges.length / 2)];
+    const max = ranges[ranges.length - 1];
+
+    if (elMin) elMin.textContent = `${Math.round(min)}m`;
+    if (elMed) elMed.textContent = `${Math.round(med)}m`;
+    if (elMax) elMax.textContent = `${Math.round(max)}m`;
+}
+
+/**
+ * Updates the 8 Results Analytics Dashboard KPI metrics.
+ */
+function updateDashboardMetrics(metrics, solverResult, validationResult, cells) {
+    const m = metrics || {};
+    const cellsList = cells || state.cells || [];
+
+    // 1. Towers (|V|)
+    const elTowers = document.getElementById("metric-towers");
+    if (elTowers) elTowers.textContent = m.vertex_count ?? m.node_count ?? (cellsList.length > 0 ? cellsList.length : "—");
+
+    // 2. Conflicts (|E|)
+    const elEdges = document.getElementById("metric-edges");
+    if (elEdges) elEdges.textContent = m.edge_count ?? (state.interferenceEdges && state.interferenceEdges.length > 0 ? state.interferenceEdges.length : (state.cells.length > 0 ? "0" : "—"));
+
+    // 3. Max Degree (Δ)
+    const elDegree = document.getElementById("metric-degree");
+    if (elDegree) elDegree.textContent = m.max_degree ?? (state.cells.length > 0 ? "0" : "—");
+
+    // 4. Density (ρ)
+    const elDensity = document.getElementById("metric-density");
+    if (elDensity) {
+        elDensity.textContent = m.density !== undefined ? `${(m.density * 100).toFixed(1)}%` : (state.cells.length > 1 ? "0.0%" : "—");
+    }
+
+    // 5. 4G/5G Ratio Breakdown
+    const el4G = document.getElementById("badge-ratio-4g");
+    const el5G = document.getElementById("badge-ratio-5g");
+    const tech = m.technology_distribution || m.tech_distribution;
+    let count4G = 0, count5G = 0;
+    if (tech) {
+        count4G = tech["4G"] ?? 0;
+        count5G = tech["5G"] ?? 0;
+    } else if (cellsList.length > 0) {
+        count4G = cellsList.filter((c) => (c.radio || "").includes("4G") || (c.radio || "").includes("LTE")).length;
+        count5G = cellsList.filter((c) => (c.radio || "").includes("5G") || (c.radio || "").includes("NR")).length;
+    }
+    if (el4G) el4G.textContent = cellsList.length > 0 ? `4G: ${count4G}` : "4G: —";
+    if (el5G) el5G.textContent = cellsList.length > 0 ? `5G: ${count5G}` : "5G: —";
+
+    // 6. Colors Used (k)
+    const elColors = document.getElementById("metric-colors");
+    if (elColors) {
+        if (solverResult && solverResult.color_count !== undefined) {
+            elColors.textContent = `${solverResult.color_count} ch`;
+        } else {
+            elColors.textContent = "—";
+        }
+    }
+
+    // 7. Runtime (ms)
+    const elRuntime = document.getElementById("metric-runtime");
+    if (elRuntime) {
+        if (solverResult && solverResult.runtime_ms !== undefined) {
+            elRuntime.textContent = `${solverResult.runtime_ms.toFixed(2)} ms`;
+        } else {
+            elRuntime.textContent = "—";
+        }
+    }
+
+    // 8. Independent Validation Status Badge
+    const elVal = document.getElementById("metric-validation-badge");
+    if (elVal) {
+        if (!solverResult && !validationResult) {
+            elVal.className = "badge-validation badge-val-waiting";
+            elVal.textContent = state.cells.length > 0 ? "Awaiting Run" : "Awaiting Data";
+        } else {
+            const val = validationResult || solverResult?.validation;
+            if (val?.is_valid) {
+                elVal.className = "badge-validation badge-val-valid";
+                elVal.innerHTML = "✔ 0 Conflicts (Valid)";
+            } else if (val) {
+                elVal.className = "badge-validation badge-val-invalid";
+                elVal.innerHTML = `✖ ${val.conflict_count || 1} Conflict(s)`;
+            } else {
+                elVal.className = "badge-validation badge-val-waiting";
+                elVal.textContent = "Unchecked";
+            }
+        }
+    }
+}
+
+/**
+ * Scoreboard update adapter for both optimization runs and comparisons.
+ */
+function updateScoreboard(opt) {
+    const algoKey = getSelectedAlgoKey();
+    const solverResult = opt?.[algoKey];
+    const validation = solverResult?.validation;
+    updateDashboardMetrics(opt?.metrics, solverResult, validation, state.cells);
+    renderEmbeddedComparisonCard();
+}
+
+/**
+ * Renders the embedded side-by-side solver comparison card inside the analytics dock.
+ */
+function renderEmbeddedComparisonCard() {
+    const cardEl = document.getElementById("dashboard-compare-card");
+    if (!cardEl) return;
+
+    const opt = state.optimizationResults;
+    if (!opt) {
+        cardEl.innerHTML = `
+            <div class="compare-card-container compare-card-empty">
+                <span class="empty-icon">⚖️</span>
+                <div class="empty-text">
+                    <strong>Heuristic Benchmark Ready:</strong> Run frequency optimization to compare DSatur vs Welsh–Powell channels, execution speed, and validation status side-by-side.
+                </div>
+                <button id="btn-open-compare-empty" class="btn btn-secondary btn-xs" onclick="document.getElementById('btn-optimize')?.click()">
+                    ⚡ Run Solvers
+                </button>
+            </div>
+        `;
+        return;
+    }
+
+    const ds = opt.dsatur;
+    const wp = opt.welsh_powell;
+    const ex = opt.exact;
+    const best = (opt.best_algorithm || "").toLowerCase();
+
+    const isDsBest = best.includes("dsatur") && best !== "exact_dsatur_bnb";
+    const isWpBest = best.includes("welsh");
+
+    const colorDiff = (ds && wp) ? (ds.color_count - wp.color_count) : 0;
+    let verdictTag = "";
+    let verdictDesc = "";
+
+    if (colorDiff < 0) {
+        verdictTag = `<span class="badge-verdict badge-verdict-win">⭐ DSatur Won (-${-colorDiff} ch)</span>`;
+        verdictDesc = `DSatur saved ${-colorDiff} channel(s) (${(((-colorDiff) / wp.color_count) * 100).toFixed(0)}% reduction) by dynamically prioritizing saturated vertices.`;
+    } else if (colorDiff > 0) {
+        verdictTag = `<span class="badge-verdict badge-verdict-win">⭐ Welsh-Powell Won (-${colorDiff} ch)</span>`;
+        verdictDesc = `Welsh-Powell saved ${colorDiff} channel(s) on this specific degree distribution.`;
+    } else if (ds && wp) {
+        verdictTag = `<span class="badge-verdict badge-verdict-tie">🤝 Heuristics Tied (${ds.color_count} ch)</span>`;
+        const faster = (wp.runtime_ms < ds.runtime_ms) ? "Welsh-Powell" : "DSatur";
+        const speedup = (Math.max(ds.runtime_ms, wp.runtime_ms) / Math.max(0.001, Math.min(ds.runtime_ms, wp.runtime_ms))).toFixed(1);
+        verdictDesc = `Both algorithms achieved identical chromatic bound (${ds.color_count} channels). ${faster} was ${speedup}x faster.`;
+    }
+
+    if (ex?.proven_optimal) {
+        verdictDesc += ` Exact chromatic number proven: χ(G) = ${ex.color_count}.`;
+    }
+
+    const dsValid = ds?.validation?.is_valid ? "✔ 0 Conflicts" : (ds ? "✖ Conflict" : "—");
+    const wpValid = wp?.validation?.is_valid ? "✔ 0 Conflicts" : (wp ? "✖ Conflict" : "—");
+
+    cardEl.innerHTML = `
+        <div class="compare-card-container">
+            <div class="compare-card-topbar">
+                <div class="compare-card-title-group">
+                    <span class="compare-card-icon">⚖️</span>
+                    <span class="compare-card-heading">Solver Benchmark &amp; Comparison</span>
+                </div>
+                <div class="compare-card-delta-tag" id="card-delta-tag">${verdictTag}</div>
+            </div>
+
+            <div class="compare-columns-grid">
+                <!-- DSatur Column -->
+                <div class="compare-solver-box ${isDsBest ? 'winner-box' : ''}" id="col-dsatur">
+                    <div class="solver-box-head">
+                        <span class="solver-box-title">DSatur ${isDsBest ? '⭐' : ''}</span>
+                        <span class="solver-paradigm-badge">Dynamic Saturation</span>
+                    </div>
+                    <div class="solver-stat-row">
+                        <div class="solver-stat">
+                            <span class="solver-stat-num">${ds ? ds.color_count : '—'}</span>
+                            <span class="solver-stat-lbl">Channels</span>
+                        </div>
+                        <div class="solver-stat">
+                            <span class="solver-stat-num">${ds ? ds.runtime_ms.toFixed(2) + ' ms' : '—'}</span>
+                            <span class="solver-stat-lbl">Runtime</span>
+                        </div>
+                    </div>
+                    <div class="solver-box-footer">
+                        <span class="solver-valid-badge ${ds?.validation?.is_valid ? 'badge-val-valid' : 'badge-val-invalid'}">${dsValid}</span>
+                    </div>
+                </div>
+
+                <!-- Welsh-Powell Column -->
+                <div class="compare-solver-box ${isWpBest ? 'winner-box' : ''}" id="col-wp">
+                    <div class="solver-box-head">
+                        <span class="solver-box-title">Welsh–Powell ${isWpBest ? '⭐' : ''}</span>
+                        <span class="solver-paradigm-badge">Static Degree</span>
+                    </div>
+                    <div class="solver-stat-row">
+                        <div class="solver-stat">
+                            <span class="solver-stat-num">${wp ? wp.color_count : '—'}</span>
+                            <span class="solver-stat-lbl">Channels</span>
+                        </div>
+                        <div class="solver-stat">
+                            <span class="solver-stat-num">${wp ? wp.runtime_ms.toFixed(2) + ' ms' : '—'}</span>
+                            <span class="solver-stat-lbl">Runtime</span>
+                        </div>
+                    </div>
+                    <div class="solver-box-footer">
+                        <span class="solver-valid-badge ${wp?.validation?.is_valid ? 'badge-val-valid' : 'badge-val-invalid'}">${wpValid}</span>
+                    </div>
+                </div>
+
+                <!-- Efficiency Delta & Action Column -->
+                <div class="compare-verdict-box" id="col-verdict">
+                    <div class="verdict-box-top">
+                        <span class="verdict-box-lbl">EFFICIENCY DELTA</span>
+                        <p class="verdict-box-desc">${verdictDesc}</p>
+                    </div>
+                    <div class="verdict-box-actions">
+                        <button id="btn-open-compare" class="btn btn-secondary btn-xs btn-modal-trigger">
+                            <span>Full Matrix &amp; Bounds ↗</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+
+    const btnModal = cardEl.querySelector("#btn-open-compare");
+    const compareModal = document.getElementById("compare-modal");
+    if (btnModal && compareModal) {
+        btnModal.addEventListener("click", () => {
+            renderCompareModalContent();
+            compareModal.classList.add("open");
+            compareModal.setAttribute("aria-hidden", "false");
+        });
+    }
+}
+
+/**
+ * Renders semantic, keyboard-accessible frequency chips with channel counts
+ * and an explicit "Show All" reset button.
+ */
+function renderLegend(maxFreq, algoKey) {
+    const legendContainer = document.getElementById("legend-container");
+    const legendItems = document.getElementById("legend-items");
+    const clearBtn = document.getElementById("btn-clear-isolate");
+    const hintText = document.getElementById("legend-hint");
+    if (!legendContainer || !legendItems) return;
+
+    legendItems.innerHTML = "";
+    if (clearBtn) {
+        clearBtn.style.display = state.isolatedFrequency ? "inline-flex" : "none";
+        clearBtn.onclick = () => clearFrequencyIsolation();
+    }
+
+    const algoResult = state.optimizationResults?.[algoKey];
+    const coloring = algoResult?.coloring || {};
+
+    // Count channel occurrences across current coloring
+    const channelCounts = {};
+    for (let f = 1; f <= maxFreq; f++) channelCounts[f] = 0;
+    Object.values(coloring).forEach((freq) => {
+        const ch = freq + 1;
+        channelCounts[ch] = (channelCounts[ch] || 0) + 1;
+    });
+
+    // 1. "Show All" Reset Button
+    const btnAll = document.createElement("button");
+    btnAll.type = "button";
+    btnAll.className = `legend-chip legend-chip-all ${state.isolatedFrequency === null ? "active-isolate" : ""}`;
+    btnAll.setAttribute("role", "button");
+    btnAll.setAttribute("aria-pressed", state.isolatedFrequency === null ? "true" : "false");
+    btnAll.setAttribute("aria-label", "Show all frequency channels");
+    btnAll.innerHTML = `<span>All (${state.cells.length})</span>`;
+    btnAll.addEventListener("click", () => clearFrequencyIsolation());
+    legendItems.appendChild(btnAll);
+
+    // 2. Individual Frequency Channel Buttons
+    for (let f = 1; f <= maxFreq; f++) {
+        const color = getFrequencyColor(f - 1);
+        const count = channelCounts[f] || 0;
+        const isIsolated = state.isolatedFrequency === f;
+
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = `legend-chip ${isIsolated ? "active-isolate" : ""}`;
+        chip.dataset.channel = f;
+        chip.setAttribute("role", "button");
+        chip.setAttribute("aria-pressed", isIsolated ? "true" : "false");
+        chip.setAttribute("aria-label", `Filter channel f${f}, ${count} towers assigned`);
+
+        chip.innerHTML = `
+            <span class="legend-color-dot" style="background-color: ${color};"></span>
+            <span>Freq ${f} (f${f})</span>
+            <span class="legend-count-pill">${count}</span>
+        `;
+
+        chip.addEventListener("click", () => isolateFrequency(f));
+        chip.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                isolateFrequency(f);
+            }
+        });
+
+        legendItems.appendChild(chip);
+    }
+
+    if (hintText) {
+        hintText.textContent = state.isolatedFrequency 
+            ? `Channel f${state.isolatedFrequency} isolated (${channelCounts[state.isolatedFrequency] || 0} towers). Click 'Clear' or 'All' to restore.`
+            : "Click a channel to isolate matching towers on map and graph";
+    }
+
+    legendContainer.style.display = "flex";
+}
+
+/**
+ * Toggles frequency isolation for channelNum.
+ */
+function isolateFrequency(channelNum) {
+    const algoKey = getSelectedAlgoKey();
+    const coloring = state.optimizationResults?.[algoKey]?.coloring;
+    if (!coloring) return;
+
+    if (state.isolatedFrequency === channelNum) {
+        clearFrequencyIsolation();
+        return;
+    }
+
+    state.isolatedFrequency = channelNum;
+
+    // Update chip aria-pressed and classes
+    const chips = document.querySelectorAll(".legend-chip");
+    chips.forEach((c) => {
+        const isMatch = Number(c.dataset.channel) === channelNum;
+        c.classList.toggle("active-isolate", isMatch);
+        c.setAttribute("aria-pressed", isMatch ? "true" : "false");
+    });
+    const btnAll = document.querySelector(".legend-chip-all");
+    btnAll?.classList.remove("active-isolate");
+    btnAll?.setAttribute("aria-pressed", "false");
+
+    const clearBtn = document.getElementById("btn-clear-isolate");
+    if (clearBtn) clearBtn.style.display = "inline-flex";
+
+    const hintText = document.getElementById("legend-hint");
+    if (hintText) hintText.textContent = `Channel f${channelNum} isolated. Click again or 'Clear' to restore full view.`;
+
+    // Harmonize visuals across Map and Canvas
+    updateMapVisualStyles();
+    if (state.activeView === "graph") {
+        renderGraphExplorer();
+    }
+}
+
+/**
+ * Resets channel isolation and restores normal visibility to all towers.
+ */
+function clearFrequencyIsolation() {
+    state.isolatedFrequency = null;
+
+    const chips = document.querySelectorAll(".legend-chip");
+    chips.forEach((c) => {
+        c.classList.remove("active-isolate");
+        c.setAttribute("aria-pressed", "false");
+    });
+    const btnAll = document.querySelector(".legend-chip-all");
+    btnAll?.classList.add("active-isolate");
+    btnAll?.setAttribute("aria-pressed", "true");
+
+    const clearBtn = document.getElementById("btn-clear-isolate");
+    if (clearBtn) clearBtn.style.display = "none";
+
+    const hintText = document.getElementById("legend-hint");
+    if (hintText) hintText.textContent = "Click a channel to isolate matching towers on map and graph";
+
+    updateMapVisualStyles();
+    if (state.activeView === "graph") {
+        renderGraphExplorer();
+    }
 }
 
 /**
@@ -539,9 +1331,6 @@ function handleGeolocation() {
  */
 function loadDemoTowers() {
     const statusMsg = document.getElementById("cells-status");
-    const metricTowers = document.getElementById("metric-towers");
-    const btnOptimize = document.getElementById("btn-optimize");
-
     const center = state.currentCenter;
     const demoTowers = [];
     const count = 14;
@@ -555,9 +1344,9 @@ function loadDemoTowers() {
         const dLon = (dist * Math.sin(angle)) / (111139.0 * Math.cos((center.lat * Math.PI) / 180));
 
         demoTowers.push({
-            tower_id: `DEMO_LTE_${i + 1}`,
+            tower_id: `DEMO_CELL_${i + 1}`,
             cell_id: 900000 + (i + 1),
-            radio: i % 3 === 0 ? "5G NR" : "4G LTE",
+            radio: i % 3 === 0 ? "5G" : "4G",
             latitude: Number((center.lat + dLat).toFixed(5)),
             longitude: Number((center.lon + dLon).toFixed(5)),
             range_m: 350.0,
@@ -567,21 +1356,28 @@ function loadDemoTowers() {
         });
     }
 
+    state.rawFetchedCells = demoTowers;
+    state.eligibleCells = demoTowers;
     state.cells = demoTowers;
+    state.accounting = {
+        available_count: demoTowers.length,
+        eligible_count: demoTowers.length,
+        selected_count: demoTowers.length,
+        excluded_count: 0,
+    };
+
     updateLocationMode("demo");
+    updateAccountingDisplay(state.accounting);
     renderCellTowers(demoTowers);
-
-    if (metricTowers) metricTowers.textContent = demoTowers.length;
+    updateRangeStatsDisplay(demoTowers);
     resetOptimizationScoreboard();
+    updateDashboardMetrics(null, null, null, demoTowers);
 
-    statusMsg.textContent = `Generated ${demoTowers.length} simulated cellular towers with overlapping coverage. Building interference graph...`;
-    statusMsg.style.color = "var(--accent-emerald)";
-    const btnBuild = document.getElementById("btn-build-graph");
-    const btnCompare = document.getElementById("btn-compare-action");
-    if (btnBuild) btnBuild.disabled = false;
-    if (btnOptimize) btnOptimize.disabled = false;
-    if (btnCompare) btnCompare.disabled = false;
-
+    if (statusMsg) {
+        statusMsg.textContent = `Generated ${demoTowers.length} simulated cellular towers with overlapping coverage. Building interference graph...`;
+        statusMsg.style.color = "var(--accent-emerald)";
+    }
+    setPipelineButtonsDisabled(false, false, false, false);
     buildInterferenceGraphUI(false);
 }
 
@@ -591,70 +1387,77 @@ function loadDemoTowers() {
 async function fetchNearbyCells() {
     const btnFetch = document.getElementById("btn-fetch");
     const statusMsg = document.getElementById("cells-status");
-    const btnOptimize = document.getElementById("btn-optimize");
-    const btnBuild = document.getElementById("btn-build-graph");
-    const btnCompare = document.getElementById("btn-compare-action");
-    const metricTowers = document.getElementById("metric-towers");
 
-    btnFetch.disabled = true;
-    btnFetch.textContent = "Fetching Cells...";
-    statusMsg.textContent = "Querying cell towers via sub-grid tiling...";
-    statusMsg.style.color = "var(--text-secondary)";
+    if (state.selectedRadios.length === 0) {
+        const techWarn = document.getElementById("tech-warning");
+        if (techWarn) techWarn.style.display = "block";
+        setPipelineButtonsDisabled(true, true, true, true);
+        return;
+    }
+
+    setPipelineButtonsDisabled(true, true, true, true);
+    if (btnFetch) btnFetch.innerHTML = '<span class="spinner">⏳</span> Fetching...';
+    if (statusMsg) {
+        statusMsg.textContent = "Querying 4G/5G cell records with spatial dispersion...";
+        statusMsg.style.color = "var(--text-secondary)";
+    }
 
     try {
-        const url = `/api/cells?lat=${state.currentCenter.lat}&lon=${state.currentCenter.lon}&radius_m=${state.radiusMetres}`;
+        const radiosParam = state.selectedRadios.join(",");
+        const url = `/api/cells?lat=${state.currentCenter.lat}&lon=${state.currentCenter.lon}&radius_m=${state.radiusMetres}&radios=${radiosParam}&limit=${state.recordLimit}&aggregate_2m=${state.aggregate2m}`;
         const res = await fetch(url);
         const data = await res.json();
 
         if (!res.ok) {
-            const errorMsg = data.detail || `Server error (HTTP ${res.status})`;
-            throw new Error(errorMsg);
+            throw new Error(data.detail || `Server error (HTTP ${res.status})`);
         }
 
+        state.rawFetchedCells = data.cells || [];
+        state.eligibleCells = data.cells || [];
         state.cells = data.cells || [];
+        state.accounting = data.accounting || {
+            available_count: state.cells.length,
+            eligible_count: state.cells.length,
+            selected_count: state.cells.length,
+            excluded_count: 0,
+        };
+
+        updateAccountingDisplay(state.accounting);
         renderCellTowers(state.cells);
-
-        // Update scoreboard
-        if (metricTowers) {
-            metricTowers.textContent = state.cells.length;
-        }
-
-        // Reset previous optimization results
+        updateRangeStatsDisplay(state.cells);
         resetOptimizationScoreboard();
+        updateDashboardMetrics(null, null, null, state.cells);
 
         if (state.cells.length === 0) {
-            statusMsg.innerHTML = "No crowd-sourced towers registered at this exact spot. <strong>Tip:</strong> Pick <em>'South Delhi (100+ Live Towers)'</em> or click <em>'⚡ Demo Grid'</em>!";
-            statusMsg.style.color = "var(--accent-amber)";
-            if (btnBuild) btnBuild.disabled = true;
-            if (btnOptimize) btnOptimize.disabled = true;
-            if (btnCompare) btnCompare.disabled = true;
+            if (statusMsg) {
+                statusMsg.innerHTML = "No crowd-sourced 4G/5G towers found in this area. <strong>Tip:</strong> Pick <em>'South Delhi'</em> or click <em>'⚡ Demo Grid'</em>!";
+                statusMsg.style.color = "var(--accent-amber)";
+            }
+            setPipelineButtonsDisabled(false, true, true, true);
         } else {
-            let info = `Found ${state.cells.length} towers within ${state.radiusMetres}m.`;
-            if (data.metadata?.is_partial) {
-                info += " (Results include 50-limit tile caps).";
+            if (statusMsg) {
+                let info = `Retained ${state.cells.length} towers within ${state.radiusMetres}m (matching ${state.selectedRadios.join("+")}).`;
+                if (data.metadata?.cached || data.cached) {
+                    info += " [Loaded from cache]";
+                }
+                statusMsg.textContent = info;
+                statusMsg.style.color = "var(--accent-emerald)";
             }
-            if (data.metadata?.cached || data.cached) {
-                info += " [Loaded from cache]";
-            }
-            statusMsg.textContent = info;
-            statusMsg.style.color = "var(--accent-emerald)";
-            if (btnBuild) btnBuild.disabled = false;
-            if (btnOptimize) btnOptimize.disabled = false;
-            if (btnCompare) btnCompare.disabled = false;
-
-            // Automatically build interference graph from returned towers
+            setPipelineButtonsDisabled(false, false, false, false);
             buildInterferenceGraphUI(false);
         }
     } catch (err) {
         console.error("Fetch cells failed:", err);
-        statusMsg.textContent = `Error: ${err.message}`;
-        statusMsg.style.color = "var(--accent-rose)";
-        if (btnBuild) btnBuild.disabled = true;
-        if (btnOptimize) btnOptimize.disabled = true;
-        if (btnCompare) btnCompare.disabled = true;
+        if (statusMsg) {
+            statusMsg.textContent = `Error: ${err.message}`;
+            statusMsg.style.color = "var(--accent-rose)";
+        }
+        setPipelineButtonsDisabled(false, true, true, true);
     } finally {
-        btnFetch.disabled = false;
-        btnFetch.textContent = "Fetch Towers";
+        if (btnFetch) {
+            btnFetch.disabled = false;
+            btnFetch.innerHTML = '<span class="btn-icon">📡</span> Fetch Records';
+        }
     }
 }
 
@@ -834,33 +1637,8 @@ function closeVertexInspector() {
     document.getElementById("analytics-dock")?.classList.remove("with-inspector");
 
     if (state.selectedTowerId) {
-        const circleEl = document.getElementById(`marker-circle-${state.selectedTowerId}`);
-        if (circleEl) circleEl.classList.remove("selected-marker");
-
-        const covCircle = state.coverageCirclesById?.[state.selectedTowerId];
-        if (covCircle) {
-            const algoKey = getSelectedAlgoKey();
-            const coloring = state.optimizationResults?.[algoKey]?.coloring;
-            if (coloring && coloring[state.selectedTowerId] !== undefined) {
-                const color = getFrequencyColor(coloring[state.selectedTowerId]);
-                covCircle.setStyle({ fill: true, fillColor: color, fillOpacity: 0.18, color: color, opacity: 0.85, weight: 1.5 });
-            } else {
-                covCircle.setStyle({ fill: false, fillOpacity: 0.0, opacity: 0.35, color: "#64748b", weight: 1.5 });
-            }
-        }
-        if (state.edgesLayer) {
-            state.edgesLayer.eachLayer((layer) => {
-                layer.setStyle({
-                    color: "rgba(239, 68, 68, 0.45)",
-                    weight: 1.8,
-                    opacity: 0.75,
-                    dashArray: "4, 4",
-                });
-            });
-        }
-
         state.selectedTowerId = null;
-
+        updateMapVisualStyles();
         if (state.activeView === "graph") {
             renderGraphExplorer();
         }
@@ -877,42 +1655,11 @@ function openVertexInspector(towerId) {
     const cell = state.cellsById[towerId];
     if (!cell) return;
 
-    // Remove previous selection styling
-    if (state.selectedTowerId && state.selectedTowerId !== towerId) {
-        const prevCircle = document.getElementById(`marker-circle-${state.selectedTowerId}`);
-        if (prevCircle) prevCircle.classList.remove("selected-marker");
-
-        const prevCov = state.coverageCirclesById?.[state.selectedTowerId];
-        if (prevCov) {
-            const algoKey = getSelectedAlgoKey();
-            const coloring = state.optimizationResults?.[algoKey]?.coloring;
-            if (coloring && coloring[state.selectedTowerId] !== undefined) {
-                const color = getFrequencyColor(coloring[state.selectedTowerId]);
-                prevCov.setStyle({ fill: true, fillColor: color, fillOpacity: 0.18, color: color, opacity: 0.85, weight: 1.5 });
-            } else {
-                prevCov.setStyle({ fill: false, fillOpacity: 0.0, opacity: 0.35, color: "#64748b", weight: 1.5 });
-            }
-        }
-    }
-
     state.selectedTowerId = towerId;
+    updateMapVisualStyles();
 
-    // Highlight current marker on map
-    const currCircle = document.getElementById(`marker-circle-${towerId}`);
-    if (currCircle) currCircle.classList.add("selected-marker");
-
-    // Highlight current coverage circle on map
-    const currCov = state.coverageCirclesById?.[towerId];
     const algoKey = getSelectedAlgoKey();
     const coloring = state.optimizationResults?.[algoKey]?.coloring;
-    if (currCov) {
-        if (coloring && coloring[towerId] !== undefined) {
-            const color = getFrequencyColor(coloring[towerId]);
-            currCov.setStyle({ fill: true, fillColor: color, fillOpacity: 0.35, color: color, opacity: 1.0, weight: 3 });
-        } else {
-            currCov.setStyle({ fill: true, fillColor: "#38bdf8", fillOpacity: 0.15, color: "#38bdf8", opacity: 0.9, weight: 2.5 });
-        }
-    }
 
     // Header info with stable cell label
     document.getElementById("inspector-radio").textContent = cell.radio;
@@ -943,44 +1690,22 @@ function openVertexInspector(towerId) {
     document.getElementById("insp-mcc-mnc").textContent = `${cell.mcc ?? "—"} / ${cell.mnc ?? "—"}`;
     document.getElementById("insp-lac").textContent = `${cell.lac ?? "—"}`;
 
-    // Degree and neighbors
-    const neighbors = [];
-    state.interferenceEdges.forEach((edge) => {
-        const u = edge.source_id || edge.source;
-        const v = edge.target_id || edge.target;
-        if (u === towerId) {
-            neighbors.push({ id: v, dist: edge.distance_m, threshold: edge.threshold_m, rule: edge.rule });
-        } else if (v === towerId) {
-            neighbors.push({ id: u, dist: edge.distance_m, threshold: edge.threshold_m, rule: edge.rule });
-        }
-    });
-
-    document.getElementById("insp-degree").textContent = neighbors.length;
-
-    // Highlight incident edges on map and dim others
-    if (state.edgesLayer) {
-        state.edgesLayer.eachLayer((layer) => {
-            if (!layer.edgeData) return;
-            const u = layer.edgeData.source_id || layer.edgeData.source;
-            const v = layer.edgeData.target_id || layer.edgeData.target;
-            if (u === towerId || v === towerId) {
-                layer.setStyle({
-                    color: "#f59e0b",
-                    weight: 3.5,
-                    opacity: 1.0,
-                    dashArray: null,
-                });
-                layer.bringToFront();
-            } else {
-                layer.setStyle({
-                    color: "rgba(239, 68, 68, 0.15)",
-                    weight: 1.0,
-                    opacity: 0.25,
-                    dashArray: "3, 3",
-                });
+    // Degree and neighbors from O(1) index or fallback
+    let neighbors = state.adjacencyMap.get(towerId);
+    if (!neighbors || neighbors.length === 0) {
+        neighbors = [];
+        state.interferenceEdges.forEach((edge) => {
+            const u = edge.source_id || edge.source;
+            const v = edge.target_id || edge.target;
+            if (u === towerId) {
+                neighbors.push({ id: v, dist: edge.distance_m, threshold: edge.threshold_m, rule: edge.rule });
+            } else if (v === towerId) {
+                neighbors.push({ id: u, dist: edge.distance_m, threshold: edge.threshold_m, rule: edge.rule });
             }
         });
     }
+
+    document.getElementById("insp-degree").textContent = neighbors.length;
 
     // Check validation / conflict status
     const inspValidation = document.getElementById("insp-validation");
@@ -1126,6 +1851,7 @@ async function runFrequencyOptimization() {
             cells: state.cells.length > 0 ? state.cells : null,
             algorithm: state.activeAlgorithm,
             radius_override_m: state.coverageRadiusOverride > 0 ? state.coverageRadiusOverride : null,
+            aggregate_2m: state.aggregate2m,
         };
 
         const res = await fetch("/api/optimize", {
@@ -1148,13 +1874,10 @@ async function runFrequencyOptimization() {
             metrics: data.metrics,
         };
         state.interferenceEdges = data.edges || [];
+        buildGraphAdjacencyIndex(state.interferenceEdges);
 
-        // 1. Populate scoreboard metrics
-        const m = data.metrics || {};
-        document.getElementById("metric-towers").textContent = m.node_count ?? state.cells.length;
-        document.getElementById("metric-edges").textContent = m.edge_count ?? 0;
-        document.getElementById("metric-degree").textContent = m.max_degree ?? 0;
-        document.getElementById("metric-density").textContent = `${((m.density ?? 0) * 100).toFixed(1)}%`;
+        // 1. Populate scoreboard metrics & embedded comparison card
+        updateScoreboard(state.optimizationResults);
 
         // 2. Populate comparison table
         const wp = data.welsh_powell;
@@ -1169,16 +1892,20 @@ async function runFrequencyOptimization() {
 
         if (ds) {
             const isValid = ds.validation?.is_valid ?? ds.is_valid;
-            document.getElementById("res-dsatur-colors").textContent = `${ds.color_count} colors (${ds.runtime_ms.toFixed(2)} ms)`;
-            document.getElementById("res-dsatur-valid").innerHTML = isValid
+            const elDsColors = document.getElementById("res-dsatur-colors");
+            const elDsValid = document.getElementById("res-dsatur-valid");
+            if (elDsColors) elDsColors.textContent = `${ds.color_count} colors (${ds.runtime_ms.toFixed(2)} ms)`;
+            if (elDsValid) elDsValid.innerHTML = isValid
                 ? '<span style="color: var(--accent-emerald)">✔ Valid</span>'
                 : '<span style="color: var(--accent-rose)">✖ Collision</span>';
         }
 
         if (wp) {
             const isValid = wp.validation?.is_valid ?? wp.is_valid;
-            document.getElementById("res-wp-colors").textContent = `${wp.color_count} colors (${wp.runtime_ms.toFixed(2)} ms)`;
-            document.getElementById("res-wp-valid").innerHTML = isValid
+            const elWpColors = document.getElementById("res-wp-colors");
+            const elWpValid = document.getElementById("res-wp-valid");
+            if (elWpColors) elWpColors.textContent = `${wp.color_count} colors (${wp.runtime_ms.toFixed(2)} ms)`;
+            if (elWpValid) elWpValid.innerHTML = isValid
                 ? '<span style="color: var(--accent-emerald)">✔ Valid</span>'
                 : '<span style="color: var(--accent-rose)">✖ Collision</span>';
         }
@@ -1548,6 +2275,8 @@ async function buildInterferenceGraphUI(userInitiated = false) {
             radius_m: state.radiusMetres,
             cells: state.cells,
             radius_override_m: state.coverageRadiusOverride > 0 ? state.coverageRadiusOverride : null,
+            aggregate_2m: state.aggregate2m,
+            aggregate_2m: state.aggregate2m,
         };
 
         const res = await fetch("/api/graph/build", {
@@ -1562,19 +2291,12 @@ async function buildInterferenceGraphUI(userInitiated = false) {
         }
 
         state.interferenceEdges = data.edges || [];
+        buildGraphAdjacencyIndex(state.interferenceEdges);
         renderInterferenceEdges(state.interferenceEdges);
 
         // Update KPI metrics on scoreboard
-        const m = data.metrics || {};
-        const metricTowers = document.getElementById("metric-towers");
-        const metricEdges = document.getElementById("metric-edges");
-        const metricDegree = document.getElementById("metric-degree");
-        const metricDensity = document.getElementById("metric-density");
-
-        if (metricTowers) metricTowers.textContent = m.vertex_count ?? state.cells.length;
-        if (metricEdges) metricEdges.textContent = m.edge_count ?? data.edges.length;
-        if (metricDegree) metricDegree.textContent = m.max_degree ?? "—";
-        if (metricDensity) metricDensity.textContent = m.density !== undefined ? m.density.toFixed(3) : "—";
+        updateDashboardMetrics(data.metrics, null, null, state.cells);
+        updateMapVisualStyles();
 
         // If graph view is active, update canvas
         if (state.activeView === "graph") {
@@ -1585,6 +2307,7 @@ async function buildInterferenceGraphUI(userInitiated = false) {
         if (btnCompare) btnCompare.disabled = false;
 
         if (statusMsg) {
+            const m = data.metrics || {};
             if (m.data_unsuitable) {
                 statusMsg.innerHTML = `Graph built: ${data.nodes.length} vertices, ${data.edges.length} edges (complete clique K<sub>${data.nodes.length}</sub>). <br><strong style="color:var(--accent-amber);">⚠️ Data Notice:</strong> All towers are co-located at identical coordinates (${m.min_distance_m}m separation). Each transceiver mutually conflicts under circular coverage.`;
                 statusMsg.style.color = "var(--accent-amber)";
@@ -1810,95 +2533,6 @@ function applyActiveColoring() {
 }
 
 /**
- * Renders the frequency color palette legend chips.
- */
-function renderLegend(maxFreq, algoKey) {
-    const legendContainer = document.getElementById("legend-container");
-    const legendItems = document.getElementById("legend-items");
-    if (!legendContainer || !legendItems) return;
-
-    legendItems.innerHTML = "";
-    for (let f = 1; f <= maxFreq; f++) {
-        const color = getFrequencyColor(f - 1);
-        const chip = document.createElement("div");
-        chip.className = "legend-chip";
-        chip.dataset.channel = f;
-        chip.innerHTML = `
-            <span class="legend-color-dot" style="background-color: ${color};"></span>
-            <span>Freq ${f} (f${f})</span>
-        `;
-        chip.addEventListener("click", () => isolateFrequency(f));
-        legendItems.appendChild(chip);
-    }
-
-    legendContainer.style.display = "flex";
-}
-
-/**
- * Interactive frequency channel isolation:
- * Highlights towers and coverage circles assigned to channel `channelNum` and dims others.
- */
-function isolateFrequency(channelNum) {
-    const algoKey = getSelectedAlgoKey();
-    const coloring = state.optimizationResults?.[algoKey]?.coloring;
-    if (!coloring) return;
-
-    const chips = document.querySelectorAll(".legend-chip");
-    if (state.isolatedFrequency === channelNum) {
-        // Toggle off isolation
-        state.isolatedFrequency = null;
-        chips.forEach((c) => c.classList.remove("active-isolate"));
-
-        Object.entries(coloring).forEach(([towerId, freq]) => {
-            const circleEl = document.getElementById(`marker-circle-${towerId}`);
-            if (circleEl) circleEl.classList.remove("dimmed-marker");
-
-            const covCircle = state.coverageCirclesById[towerId];
-            if (covCircle) {
-                const color = getFrequencyColor(freq);
-                covCircle.setStyle({ fill: true, fillColor: color, fillOpacity: 0.18, color: color, opacity: 0.85, weight: 1.5 });
-            }
-        });
-    } else {
-        // Isolate specific channel
-        state.isolatedFrequency = channelNum;
-        chips.forEach((c) => {
-            if (Number(c.dataset.channel) === channelNum) {
-                c.classList.add("active-isolate");
-            } else {
-                c.classList.remove("active-isolate");
-            }
-        });
-
-        Object.entries(coloring).forEach(([towerId, freq]) => {
-            const isMatch = (freq + 1 === channelNum);
-            const circleEl = document.getElementById(`marker-circle-${towerId}`);
-            if (circleEl) {
-                if (isMatch) {
-                    circleEl.classList.remove("dimmed-marker");
-                } else {
-                    circleEl.classList.add("dimmed-marker");
-                }
-            }
-
-            const covCircle = state.coverageCirclesById[towerId];
-            if (covCircle) {
-                const color = getFrequencyColor(freq);
-                if (isMatch) {
-                    covCircle.setStyle({ fill: true, fillColor: color, fillOpacity: 0.32, color: color, opacity: 1.0, weight: 2.5 });
-                } else {
-                    covCircle.setStyle({ fill: true, fillColor: color, fillOpacity: 0.03, color: color, opacity: 0.15, weight: 0.5 });
-                }
-            }
-        });
-    }
-
-    if (state.activeView === "graph") {
-        renderGraphExplorer();
-    }
-}
-
-/**
  * Resets optimization scoreboard metrics, exact solver indicators, and restores circles.
  */
 function resetOptimizationScoreboard() {
@@ -1930,6 +2564,10 @@ function resetOptimizationScoreboard() {
 
     state.optimizationResults = null;
     state.interferenceEdges = [];
+    state.isolatedFrequency = null;
+
+    updateDashboardMetrics(null, null, null, state.cells);
+    renderEmbeddedComparisonCard();
 
     // Reset coverage circles and markers
     if (state.coverageCirclesById) {
@@ -1960,7 +2598,8 @@ function resetOptimizationScoreboard() {
 
 /**
  * Renders the Topology Graph Explorer view on HTML5 Canvas.
- * Supports Retina HiDPI, interactive selection, and clear channel labels.
+ * Supports Retina HiDPI, two-pass adaptive edge rendering,
+ * synchronized 1-hop neighbor highlighting, and accessible channel isolation.
  */
 function renderGraphExplorer() {
     const canvas = document.getElementById("graph-canvas");
@@ -1979,11 +2618,11 @@ function renderGraphExplorer() {
 
     ctx.clearRect(0, 0, width, height);
 
-    if (state.cells.length === 0) {
+    if (!state.cells || state.cells.length === 0) {
         ctx.fillStyle = "rgba(148, 163, 184, 0.4)";
         ctx.font = "14px Inter, sans-serif";
         ctx.textAlign = "center";
-        ctx.fillText("No cell records loaded yet. Click 'Fetch Cell Records' on the map to build graph.", width / 2, height / 2);
+        ctx.fillText("No cell records loaded yet. Click 'Fetch Records' on the map to build graph.", width / 2, height / 2);
         return;
     }
 
@@ -2038,56 +2677,93 @@ function renderGraphExplorer() {
 
     state.graphNodePositions = nodeCoords;
 
-    // 1. Draw interference edges
     const selectedId = state.selectedTowerId;
-    state.interferenceEdges.forEach((edge) => {
-        const p1 = nodeCoords[edge.source_id];
-        const p2 = nodeCoords[edge.target_id];
+    const neighborSet = selectedId ? state.neighborSets.get(selectedId) || new Set() : null;
+    const isSelectedMode = Boolean(selectedId);
+    const isIsolationMode = Boolean(state.isolatedFrequency);
+    const edgeCount = (state.interferenceEdges || []).length;
+
+    const incidentEdges = [];
+    const nonIncidentEdges = [];
+
+    (state.interferenceEdges || []).forEach((edge) => {
+        const u = edge.source_id || edge.source;
+        const v = edge.target_id || edge.target;
+        const p1 = nodeCoords[u];
+        const p2 = nodeCoords[v];
         if (!p1 || !p2) return;
 
-        const isIncident = selectedId && (edge.source_id === selectedId || edge.target_id === selectedId);
+        if (selectedId && (u === selectedId || v === selectedId)) {
+            incidentEdges.push({ edge, p1, p2, u, v });
+        } else {
+            nonIncidentEdges.push({ edge, p1, p2, u, v });
+        }
+    });
 
+    // Pass 1: Render background non-incident edges
+    nonIncidentEdges.forEach(({ edge, p1, p2, u, v }) => {
+        let bothIsolated = false;
+        if (isIsolationMode) {
+            const uFreq = coloring[u];
+            const vFreq = coloring[v];
+            bothIsolated = (uFreq !== undefined && uFreq + 1 === state.isolatedFrequency) &&
+                           (vFreq !== undefined && vFreq + 1 === state.isolatedFrequency);
+        }
+        const style = getAdaptiveEdgeStyle(edgeCount, false, isSelectedMode, isIsolationMode, bothIsolated);
         ctx.beginPath();
         ctx.moveTo(p1.x, p1.y);
         ctx.lineTo(p2.x, p2.y);
-
-        if (isIncident) {
-            ctx.lineWidth = 2.5;
-            ctx.strokeStyle = "rgba(245, 158, 11, 0.95)";
-        } else if (selectedId) {
-            ctx.lineWidth = 0.5;
-            ctx.strokeStyle = "rgba(239, 68, 68, 0.08)";
-        } else {
-            const edgeCount = state.interferenceEdges.length;
-            const alpha = edgeCount > 300 ? Math.max(0.04, Number((25.0 / edgeCount).toFixed(3))) : 0.22;
-            ctx.lineWidth = edgeCount > 300 ? 0.6 : 1;
-            ctx.strokeStyle = `rgba(239, 68, 68, ${alpha})`;
-        }
+        ctx.strokeStyle = style.strokeStyle;
+        ctx.lineWidth = style.lineWidth;
         ctx.stroke();
     });
 
-    // 2. Draw vertices
+    // Pass 2: Render incident edges on top (amber glow)
+    incidentEdges.forEach(({ edge, p1, p2 }) => {
+        const style = getAdaptiveEdgeStyle(edgeCount, true, isSelectedMode, false, false);
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.strokeStyle = style.strokeStyle;
+        ctx.lineWidth = style.lineWidth;
+        ctx.shadowColor = "rgba(245, 158, 11, 0.7)";
+        ctx.shadowBlur = 4;
+        ctx.stroke();
+        ctx.restore();
+    });
+
+    // Pass 3: Draw vertices with synchronized halo, neighbor highlights, and isolation
     state.cells.forEach((cell) => {
         const pos = nodeCoords[cell.tower_id];
         if (!pos) return;
 
-        const freq = coloring[cell.tower_id];
+        const tid = cell.tower_id;
+        const freq = coloring[tid];
         const channelNum = freq !== undefined ? freq + 1 : null;
         const color = channelNum !== null ? getFrequencyColor(freq) : "#38bdf8";
 
-        const isSelected = selectedId === cell.tower_id;
-        const isDimmed = state.isolatedFrequency && channelNum !== state.isolatedFrequency;
+        const isSelected = selectedId === tid;
+        const isNeighbor = neighborSet ? neighborSet.has(tid) : false;
+        const isMatchIsolated = isIsolationMode ? channelNum === state.isolatedFrequency : true;
+        const isDimmed = (selectedId && !isSelected && !isNeighbor) || (isIsolationMode && !isMatchIsolated);
 
         ctx.save();
         if (isDimmed) {
-            ctx.globalAlpha = 0.2;
+            ctx.globalAlpha = 0.18;
         }
 
         // Selected halo pulse ring
         if (isSelected) {
             ctx.beginPath();
-            ctx.arc(pos.x, pos.y, pos.r + 6, 0, 2 * Math.PI);
+            ctx.arc(pos.x, pos.y, pos.r + 7, 0, 2 * Math.PI);
             ctx.fillStyle = "rgba(245, 158, 11, 0.35)";
+            ctx.fill();
+        } else if (isNeighbor) {
+            // 1-hop neighbor cyan accent ring
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, pos.r + 4, 0, 2 * Math.PI);
+            ctx.fillStyle = "rgba(56, 189, 248, 0.35)";
             ctx.fill();
         }
 
@@ -2096,17 +2772,27 @@ function renderGraphExplorer() {
         ctx.arc(pos.x, pos.y, pos.r, 0, 2 * Math.PI);
         ctx.fillStyle = color;
         ctx.fill();
-        ctx.lineWidth = isSelected ? 3 : 1.5;
-        ctx.strokeStyle = isSelected ? "#f59e0b" : "#ffffff";
+
+        // Node border
+        if (isSelected) {
+            ctx.lineWidth = 3.5;
+            ctx.strokeStyle = "#f59e0b";
+        } else if (isNeighbor) {
+            ctx.lineWidth = 2.5;
+            ctx.strokeStyle = "#38bdf8";
+        } else {
+            ctx.lineWidth = 1.5;
+            ctx.strokeStyle = "#ffffff";
+        }
         ctx.stroke();
 
-        // Node text label: stable alphabetic label
+        // Stable node text label
         if (pos.r >= 9) {
             ctx.fillStyle = "#ffffff";
             ctx.font = `bold ${Math.round(pos.r * 0.72)}px 'JetBrains Mono', monospace`;
             ctx.textAlign = "center";
             ctx.textBaseline = "middle";
-            ctx.fillText(cell.label, pos.x, pos.y);
+            ctx.fillText(cell.label || "", pos.x, pos.y);
         }
 
         ctx.restore();

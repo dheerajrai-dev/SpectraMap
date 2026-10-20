@@ -14,21 +14,97 @@ EARTH_RADIUS_METRES = 6_371_000.0
 OPENCELLID_AREA_URL = "https://opencellid.org/cell/getInArea"
 ATTRIBUTION_TEXT = "Cell tower data from OpenCellID, licensed under CC BY-SA 4.0."
 
+# Canonical Radio Technologies
+RADIO_4G = "4G"
+RADIO_5G = "5G"
+VALID_RADIOS: set[str] = {RADIO_4G, RADIO_5G}
+
+# Robust mapping table from raw cellular identifiers to canonical technologies
+RADIO_SYNONYM_MAP: dict[str, str] = {
+    # 4G LTE variants
+    "LTE": RADIO_4G,
+    "4G": RADIO_4G,
+    "4G LTE": RADIO_4G,
+    "4G-LTE": RADIO_4G,
+    "4GLTE": RADIO_4G,
+    "EUTRAN": RADIO_4G,
+    "E-UTRAN": RADIO_4G,
+    "E UTRAN": RADIO_4G,
+    "LTE-M": RADIO_4G,
+    # 5G NR variants
+    "NR": RADIO_5G,
+    "5G": RADIO_5G,
+    "5G NR": RADIO_5G,
+    "5G-NR": RADIO_5G,
+    "5GNR": RADIO_5G,
+}
+
 # 4-tier coverage radii fallback hierarchy (survey_math_spec §3, decision.md Decision 6)
 RADIO_FALLBACK_RADII: dict[str, float] = {
+    RADIO_4G: 800.0,
+    RADIO_5G: 500.0,
+    "LTE": 800.0,
+    "NR": 500.0,
+    # Legacy fallbacks for backward compatibility
     "GSM": 1000.0,
     "2G": 1000.0,
     "CDMA": 1000.0,
     "UMTS": 800.0,
     "3G": 800.0,
-    "LTE": 800.0,
-    "4G": 800.0,
-    "NR": 500.0,
-    "5G": 500.0,
 }
 DEFAULT_FALLBACK_RADIUS: float = 800.0
 MIN_VALID_RANGE_M: float = 50.0
 MAX_VALID_RANGE_M: float = 10_000.0
+
+
+def normalize_radio_type(raw_radio: Any) -> str | None:
+    """
+    Normalize raw radio technology string to canonical '4G' or '5G'.
+
+    Accepts:
+        - 4G variants: LTE, 4G, 4G LTE, 4G-LTE, EUTRAN, E-UTRAN, LTE-M
+        - 5G variants: NR, 5G, 5G NR, 5G-NR, 5GNR
+    Rejects:
+        - 2G variants: GSM, 2G, CDMA, GPRS, EDGE
+        - 3G variants: UMTS, 3G, WCDMA, HSPA
+        - Other: satellite, wifi, unknown, whitespace, empty, None
+
+    Returns:
+        '4G', '5G', or None if rejected/unrecognized.
+    """
+    if raw_radio is None:
+        return None
+    val = str(raw_radio).strip().upper()
+    if not val:
+        return None
+
+    # 1. Direct dictionary match
+    if val in RADIO_SYNONYM_MAP:
+        return RADIO_SYNONYM_MAP[val]
+
+    # 2. Normalized whitespace & punctuation match
+    cleaned = val.replace("-", " ")
+    cleaned = " ".join(cleaned.split())
+    if cleaned in RADIO_SYNONYM_MAP:
+        return RADIO_SYNONYM_MAP[cleaned]
+
+    return None
+
+
+def filter_records_by_radio(
+    records: list[dict[str, Any]],
+    allowed_radios: set[str] | list[str],
+) -> list[dict[str, Any]]:
+    """
+    Filter a list of cell records to those matching the allowed canonical technologies.
+    """
+    allowed_set = {str(r).strip().upper() for r in allowed_radios}
+    normalized_allowed = {normalize_radio_type(r) or r for r in allowed_set}
+    return [
+        r for r in records
+        if (normalize_radio_type(r.get("radio")) or str(r.get("radio")).upper()) in normalized_allowed
+    ]
+
 
 
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -177,16 +253,40 @@ def validate_cell_record(raw: dict[str, Any]) -> bool:
         return False
 
 
-def normalize_cell_record(raw: dict[str, Any], retrieved_at: str | None = None) -> dict[str, Any]:
+def normalize_cell_record(
+    raw: dict[str, Any],
+    retrieved_at: str | None = None,
+    strict_radio: bool = False,
+) -> dict[str, Any]:
     """
     Transform a raw OpenCellID record into SpectraMap's standard internal schema,
-    applying the 4-tier coverage radii fallback hierarchy when necessary.
+    strictly normalizing radio technology to '4G' or '5G' and applying the
+    coverage radii fallback hierarchy.
+
+    Args:
+        raw: Raw OpenCellID cell dictionary.
+        retrieved_at: Optional ISO timestamp.
+        strict_radio: When True, raises ValueError if radio is not modern 4G or 5G.
+
+    Raises:
+        ValueError: If record fails basic validation or radio is not modern 4G/5G under strict_radio=True.
     """
     if not validate_cell_record(raw):
         raise ValueError(f"Cannot normalize invalid cell record: {raw}")
 
-    raw_radio = str(raw.get("radio") or "UNKNOWN").strip().upper()
-    radio = raw_radio if raw_radio else "UNKNOWN"
+    raw_radio = raw.get("radio")
+    canonical_radio = normalize_radio_type(raw_radio)
+
+    if canonical_radio is None:
+        if strict_radio:
+            raise ValueError(
+                f"Cannot normalize cell record: radio technology '{raw_radio}' is excluded. "
+                "SpectraMap strictly admits modern 4G (LTE) and 5G (NR) technologies."
+            )
+        radio = str(raw_radio or "UNKNOWN").strip().upper() or "UNKNOWN"
+    else:
+        radio = canonical_radio
+
     mcc = int(raw["mcc"]) if raw.get("mcc") is not None else None
     mnc = int(raw["mnc"]) if raw.get("mnc") is not None else None
     area = int(raw.get("lac") or raw.get("tac") or 0)
@@ -252,8 +352,11 @@ def normalize_cell_record(raw: dict[str, Any], retrieved_at: str | None = None) 
 
     return {
         "tower_id": tower_id,
+        "id": tower_id,
         "latitude": float(raw["lat"]),
         "longitude": float(raw["lon"]),
+        "lat": float(raw["lat"]),
+        "lon": float(raw["lon"]),
         "range_m": range_m,
         "radio": radio,
         "mcc": mcc,
@@ -500,6 +603,314 @@ async def fetch_opencellid_records(
     finally:
         if should_close:
             await client.aclose()
+
+
+def select_spatially_dispersed_records(
+    records: list[dict[str, Any]],
+    center_lat: float,
+    center_lon: float,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """
+    Select up to `limit` records using Deterministic Farthest Point Sampling (FPS).
+
+    Properties:
+    - Anchors the first seed to the candidate closest to (center_lat, center_lon).
+    - Iteratively selects the candidate that maximizes the minimum distance to the selected set.
+    - Resolves all distance ties deterministically using ascending lexicographical tower_id.
+    - Handles degenerate cases (e.g. all records co-located at d=0) cleanly via tie-breaking.
+    - Employs monotonic Haversine a-value optimization to achieve < 10ms runtime for N=200, k=50.
+    """
+    if not records or limit <= 0:
+        return []
+
+    n = len(records)
+
+    # Precompute radians and cosines for all records once (O(N))
+    c_lat_rad = math.radians(center_lat)
+    c_lon_rad = math.radians(center_lon)
+    c_cos_lat = math.cos(c_lat_rad)
+
+    rads = [
+        (
+            math.radians(float(r["latitude"] if "latitude" in r else r["lat"])),
+            math.radians(float(r["longitude"] if "longitude" in r else r["lon"])),
+        )
+        for r in records
+    ]
+    cos_phi = [math.cos(phi) for phi, _ in rads]
+    tids = [str(r.get("tower_id") or r.get("id") or "") for r in records]
+
+    def _hav_a(phi1: float, lam1: float, cos1: float, phi2: float, lam2: float, cos2: float) -> float:
+        dphi = (phi2 - phi1) * 0.5
+        dlam = (lam2 - lam1) * 0.5
+        sphi = math.sin(dphi)
+        slam = math.sin(dlam)
+        a = sphi * sphi + cos1 * cos2 * slam * slam
+        if a > 1.0:
+            return 1.0
+        if a < 0.0:
+            return 0.0
+        return a
+
+    # If candidate count is within limit, sort deterministically by center proximity and return
+    if n <= limit:
+        indexed_candidates = list(range(n))
+        indexed_candidates.sort(
+            key=lambda i: (
+                _hav_a(c_lat_rad, c_lon_rad, c_cos_lat, rads[i][0], rads[i][1], cos_phi[i]),
+                tids[i],
+            )
+        )
+        return [records[i] for i in indexed_candidates]
+
+    # Step 1: Deterministic Seed Selection (closest to center, tie-break by tower_id)
+    seed_idx = 0
+    best_dist = _hav_a(c_lat_rad, c_lon_rad, c_cos_lat, rads[0][0], rads[0][1], cos_phi[0])
+    best_tid = tids[0]
+
+    for i in range(1, n):
+        d = _hav_a(c_lat_rad, c_lon_rad, c_cos_lat, rads[i][0], rads[i][1], cos_phi[i])
+        tid = tids[i]
+        if d < best_dist - 1e-12:
+            best_dist = d
+            best_tid = tid
+            seed_idx = i
+        elif abs(d - best_dist) <= 1e-12 and tid < best_tid:
+            best_dist = d
+            best_tid = tid
+            seed_idx = i
+
+    selected_indices: list[int] = [seed_idx]
+    in_selected: list[bool] = [False] * n
+    in_selected[seed_idx] = True
+
+    # Step 2: Initialize min_dist array from seed point
+    s_phi, s_lam = rads[seed_idx]
+    s_cos = cos_phi[seed_idx]
+    min_dist = [
+        _hav_a(s_phi, s_lam, s_cos, rads[i][0], rads[i][1], cos_phi[i])
+        for i in range(n)
+    ]
+    min_dist[seed_idx] = -1.0
+
+    # Step 3: Greedy Farthest Point Sampling iterations
+    for _ in range(1, limit):
+        max_d = -1.0
+        chosen_tid: str | None = None
+        chosen_idx = -1
+
+        for i in range(n):
+            if in_selected[i]:
+                continue
+            d = min_dist[i]
+            tid = tids[i]
+            if d > max_d + 1e-12:
+                max_d = d
+                chosen_tid = tid
+                chosen_idx = i
+            elif abs(d - max_d) <= 1e-12:
+                # Deterministic tie-breaking on tower_id ascending
+                if chosen_tid is None or tid < chosen_tid:
+                    max_d = d
+                    chosen_tid = tid
+                    chosen_idx = i
+
+        in_selected[chosen_idx] = True
+        selected_indices.append(chosen_idx)
+
+        # Update min_dist with respect to newly selected candidate
+        c_phi, c_lam = rads[chosen_idx]
+        c_cos = cos_phi[chosen_idx]
+        for i in range(n):
+            if not in_selected[i]:
+                new_d = _hav_a(c_phi, c_lam, c_cos, rads[i][0], rads[i][1], cos_phi[i])
+                if new_d < min_dist[i]:
+                    min_dist[i] = new_d
+
+    return [records[i] for i in selected_indices]
+
+
+def group_cells_into_sites(
+    cells: list[dict[str, Any]],
+    precision: int = 5,
+    distance_threshold_m: float = 2.0,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Group normalized cell transceiver records sharing physical coordinates or within
+    distance_threshold_m (default: 2.0m) into SiteEntity structures.
+
+    If there are N number of towers/transceivers within a 2 metre range, they are treated
+    as belonging to 1 physical site.
+
+    Args:
+        cells: List of normalized cell record dictionaries.
+        precision: Decimal place precision for coordinate grouping (default: 5, ~1.1m precision).
+        distance_threshold_m: Distance threshold in metres to cluster co-located towers (default: 2.0m).
+
+    Returns:
+        (updated_cells, sites):
+          - updated_cells: Cell dicts updated with 'site_id' and 'is_co_located'.
+          - sites: List of SiteEntity dicts deterministically sorted by site_id.
+    """
+    if not cells:
+        return [], []
+
+    n = len(cells)
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        path = []
+        while parent[i] != i:
+            path.append(i)
+            i = parent[i]
+        for node in path:
+            parent[node] = i
+        return i
+
+    def union(i: int, j: int) -> None:
+        root_i = find(i)
+        root_j = find(j)
+        if root_i != root_j:
+            # Deterministic: attach higher index root to lower index root
+            if root_i < root_j:
+                parent[root_j] = root_i
+            else:
+                parent[root_i] = root_j
+
+    coords: list[tuple[float, float]] = []
+    for cell in cells:
+        lat = float(cell["latitude"] if "latitude" in cell else cell["lat"])
+        lon = float(cell["longitude"] if "longitude" in cell else cell["lon"])
+        coords.append((lat, lon))
+
+    # Fast clustering: pair cells within distance_threshold_m (<= 2.0m)
+    # Bounding box filter for 2m is ~0.0001 degrees
+    for i in range(n):
+        lat_i, lon_i = coords[i]
+        for j in range(i + 1, n):
+            lat_j, lon_j = coords[j]
+            # Exact coordinate match or within bounding box
+            if (lat_i == lat_j and lon_i == lon_j):
+                union(i, j)
+            elif abs(lat_i - lat_j) <= 0.0001 and abs(lon_i - lon_j) <= 0.0001:
+                dist = haversine_distance(lat_i, lon_i, lat_j, lon_j)
+                if dist <= distance_threshold_m:
+                    union(i, j)
+
+    # Group cells by disjoint set root
+    clusters: dict[int, list[dict[str, Any]]] = {}
+    for i in range(n):
+        root = find(i)
+        if root not in clusters:
+            clusters[root] = []
+        clusters[root].append(cells[i])
+
+    sites: list[dict[str, Any]] = []
+
+    for root in sorted(clusters.keys()):
+        bucket = clusters[root]
+        # Use representative coordinates (from primary cell), rounded to precision
+        rep_lat = float(bucket[0]["latitude"] if "latitude" in bucket[0] else bucket[0]["lat"])
+        rep_lon = float(bucket[0]["longitude"] if "longitude" in bucket[0] else bucket[0]["lon"])
+        lat = round(rep_lat, precision)
+        lon = round(rep_lon, precision)
+        site_id = f"SITE_{lat:.5f}_{lon:.5f}"
+
+        sector_ids = sorted([c.get("tower_id") or str(c.get("id")) for c in bucket])
+        sector_count = len(bucket)
+        is_co_located = sector_count > 1
+        radios = sorted(list({c.get("radio", "4G") for c in bucket}))
+
+        for c in bucket:
+            c["site_id"] = site_id
+            c["is_co_located"] = is_co_located
+
+        sites.append({
+            "site_id": site_id,
+            "latitude": lat,
+            "longitude": lon,
+            "sector_count": sector_count,
+            "sectors": sector_ids,
+            "radios": radios,
+        })
+
+    sites.sort(key=lambda s: s["site_id"])
+    return cells, sites
+
+
+def aggregate_towers_within_distance(
+    cells: list[dict[str, Any]],
+    distance_threshold_m: float = 2.0,
+    precision: int = 5,
+) -> list[dict[str, Any]]:
+    """
+    If there are N number of towers within distance_threshold_m (default 2.0 metres),
+    treat those towers as 1 tower.
+
+    Merges co-located transceivers/sectors sharing a physical mast into a single
+    consolidated tower entity for map display and graph construction.
+
+    Args:
+        cells: List of cell/tower records.
+        distance_threshold_m: Co-location distance threshold in metres (default 2.0m).
+        precision: Coordinate rounding precision for site identification.
+
+    Returns:
+        List of consolidated tower entities, exactly 1 entity per physical mast site.
+    """
+    if not cells:
+        return []
+
+    updated_cells, sites = group_cells_into_sites(
+        cells, precision=precision, distance_threshold_m=distance_threshold_m
+    )
+
+    by_site: dict[str, list[dict[str, Any]]] = {}
+    for c in updated_cells:
+        sid = c.get("site_id") or "UNKNOWN"
+        if sid not in by_site:
+            by_site[sid] = []
+        by_site[sid].append(c)
+
+    aggregated: list[dict[str, Any]] = []
+    for site in sites:
+        sid = site["site_id"]
+        cluster = by_site.get(sid, [])
+        if not cluster:
+            continue
+
+        primary = cluster[0]
+        max_range = max(float(c.get("range_m", 800.0) or 800.0) for c in cluster)
+        distinct_radios = sorted(list({c.get("radio", "4G") for c in cluster}))
+        rep_radio = "5G" if "5G" in distinct_radios else "4G"
+
+        tower_id = sid if len(cluster) > 1 else (primary.get("tower_id") or primary.get("id"))
+        merged_tower = dict(primary)
+        merged_tower["tower_id"] = tower_id
+        merged_tower["id"] = tower_id
+        merged_tower["site_id"] = sid
+        merged_tower["latitude"] = site["latitude"]
+        merged_tower["longitude"] = site["longitude"]
+        merged_tower["lat"] = site["latitude"]
+        merged_tower["lon"] = site["longitude"]
+        merged_tower["range_m"] = max_range
+        merged_tower["radio"] = rep_radio
+        merged_tower["radios"] = distinct_radios
+        merged_tower["sector_count"] = len(cluster)
+        merged_tower["sectors"] = [c.get("tower_id") or str(c.get("id")) for c in cluster]
+        merged_tower["is_co_located"] = len(cluster) > 1
+        merged_tower["is_range_estimated"] = any(c.get("is_range_estimated") for c in cluster)
+
+        aggregated.append(merged_tower)
+
+    # Re-assign deterministic alphabetic labels A, B, C... if labels were present
+    if any("label" in t for t in aggregated):
+        for idx, t in enumerate(aggregated):
+            t["label"] = chr(65 + idx) if idx < 26 else f"T{idx + 1}"
+
+    return aggregated
+
 
 
 

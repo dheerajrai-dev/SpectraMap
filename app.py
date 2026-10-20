@@ -24,6 +24,10 @@ from data_service import (
     fetch_opencellid_records,
     haversine_distance,
     ATTRIBUTION_TEXT,
+    normalize_radio_type,
+    select_spatially_dispersed_records,
+    group_cells_into_sites,
+    aggregate_towers_within_distance,
 )
 from graph_engine import (
     build_interference_graph,
@@ -41,6 +45,11 @@ from schemas import (
     GraphBuildRequest,
     OptimizeRequest,
     CompareRequest,
+    AccountingMetadata,
+    CellRecord,
+    SiteEntity,
+    TowersResponse,
+    GraphMetrics,
 )
 
 # Load environment variables from .env file
@@ -87,6 +96,126 @@ async def status_check():
     }
 
 
+def parse_radio_query(radios: list[str] | str | None) -> list[str]:
+    """
+    Parse and validate the radios query parameter.
+    Supports:
+      - None / omitted -> defaults to ['4G', '5G']
+      - Repeated params: ?radios=4G&radios=5G -> ['4G', '5G']
+      - Comma-delimited strings: ?radios=4G,5G -> ['4G', '5G']
+      - Case-insensitivity & aliases: 'lte' -> '4G', 'nr' -> '5G'
+    Raises:
+      HTTPException(400) on invalid or empty radio selections.
+    """
+    if radios is None:
+        return ["4G", "5G"]
+
+    raw_items: list[str] = []
+    if isinstance(radios, str):
+        raw_items = [s.strip() for s in radios.split(",") if s.strip()]
+    elif isinstance(radios, list):
+        for item in radios:
+            for part in str(item).split(","):
+                cleaned = part.strip()
+                if cleaned:
+                    raw_items.append(cleaned)
+
+    if not raw_items:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one radio technology ('4G', '5G') must be selected.",
+        )
+
+    normalized_set: set[str] = set()
+    for item in raw_items:
+        canonical = normalize_radio_type(item)
+        if canonical is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid radio technology '{item}'. Allowed values: 4G, 5G.",
+            )
+        normalized_set.add(canonical)
+
+    return sorted(list(normalized_set))
+
+
+def _process_tower_records(
+    cells: list[dict[str, Any]],
+    center_lat: float,
+    center_lon: float,
+    query_radius: float,
+    active_radios: list[str],
+    limit: int,
+    warnings: list[str],
+    is_cached: bool,
+    aggregate_2m: bool = False,
+) -> dict[str, Any]:
+    available_count = len(cells)
+
+    eligible_records: list[dict[str, Any]] = []
+    for c in cells:
+        canonical = normalize_radio_type(c.get("radio"))
+        if canonical and canonical in active_radios:
+            rec = dict(c)
+            rec["radio"] = canonical
+            tid = str(rec.get("tower_id") or rec.get("id") or "")
+            if tid.startswith("LTE_"):
+                rec["tower_id"] = "4G_" + tid[4:]
+            elif tid.startswith("NR_"):
+                rec["tower_id"] = "5G_" + tid[3:]
+            rec["id"] = rec.get("tower_id") or rec.get("id")
+            eligible_records.append(rec)
+    eligible_count = len(eligible_records)
+
+    selected_records = select_spatially_dispersed_records(
+        eligible_records, center_lat, center_lon, limit=limit
+    )
+
+    if aggregate_2m:
+        selected_records = aggregate_towers_within_distance(selected_records, 2.0)
+
+    selected_count = len(selected_records)
+
+    selected_records, sites = group_cells_into_sites(selected_records)
+
+    tech_dist = {
+        "4G": sum(1 for r in selected_records if r.get("radio") == "4G"),
+        "5G": sum(1 for r in selected_records if r.get("radio") == "5G"),
+    }
+
+    accounting = AccountingMetadata(
+        available_count=available_count,
+        eligible_count=eligible_count,
+        selected_count=selected_count,
+        excluded_count=available_count - selected_count,
+        excluded_radio_count=available_count - eligible_count,
+        excluded_limit_count=eligible_count - selected_count,
+    )
+
+    formatted_towers: list[dict[str, Any]] = []
+    for r in selected_records:
+        rec = dict(r)
+        rec["id"] = rec.get("tower_id") or rec.get("id")
+        rec["lat"] = rec.get("latitude")
+        rec["lon"] = rec.get("longitude")
+        formatted_towers.append(rec)
+
+    return {
+        "source": "OpenCellID",
+        "count": selected_count,
+        "accounting": accounting.model_dump(),
+        "towers": formatted_towers,
+        "cells": formatted_towers,
+        "sites": sites,
+        "tech_distribution": tech_dist,
+        "center": {"latitude": center_lat, "longitude": center_lon},
+        "radius_m": query_radius,
+        "warnings": warnings,
+        "attribution": ATTRIBUTION_TEXT,
+        "cached": is_cached,
+    }
+
+
 @app.get("/api/towers")
 async def get_towers(
     lat: float | None = Query(None, ge=-90.0, le=90.0, description="Center latitude in degrees"),
@@ -96,10 +225,12 @@ async def get_towers(
     south: float | None = Query(None, ge=-90.0, le=90.0, description="Bounding box south latitude"),
     east: float | None = Query(None, ge=-180.0, le=180.0, description="Bounding box east longitude"),
     north: float | None = Query(None, ge=-90.0, le=90.0, description="Bounding box north latitude"),
+    radios: list[str] | None = Query(None, description="Radio technologies to include ('4G', '5G')"),
+    limit: int = Query(50, ge=10, le=200, description="Maximum number of towers to select (10-200)"),
 ):
     """
     Fetch and validate tower records within the given radius or bounding box.
-    Returns normalized tower records, source metadata, and data quality warnings.
+    Returns normalized tower records, accounting metadata, physical site entities, and data quality warnings.
     """
     # 1. Resolve geographic center and search radius
     if west is not None and south is not None and east is not None and north is not None:
@@ -118,7 +249,10 @@ async def get_towers(
             detail="Must provide either (lat, lon) or bounding box (west, south, east, north).",
         )
 
-    # 2. Retrieve server-side API key
+    # 2. Parse & validate radio filter
+    active_radios = parse_radio_query(radios)
+
+    # 3. Retrieve server-side API key
     api_key = _get_api_key()
     if not api_key:
         raise HTTPException(
@@ -126,31 +260,22 @@ async def get_towers(
             detail="OpenCellID API key is not configured on the server. Please set OPENCELLID_API_KEY in .env.",
         )
 
-    # 3. Ingest and normalize records via data_service
+    # 4. Ingest records via data_service
     cells, warnings, is_cached = await fetch_opencellid_records(
         center_lat, center_lon, query_radius, api_key
     )
 
-    # Standardize records to include both id and tower_id
-    towers: list[dict[str, Any]] = []
-    for c in cells:
-        rec = dict(c)
-        rec["id"] = rec.get("tower_id") or rec.get("id")
-        rec["lat"] = rec.get("latitude")
-        rec["lon"] = rec.get("longitude")
-        towers.append(rec)
-
-    return {
-        "source": "OpenCellID",
-        "count": len(towers),
-        "towers": towers,
-        "cells": towers,
-        "center": {"latitude": center_lat, "longitude": center_lon},
-        "radius_m": query_radius,
-        "warnings": warnings,
-        "attribution": ATTRIBUTION_TEXT,
-        "cached": is_cached,
-    }
+    # 5. Process filtering, FPS sampling, site grouping, and accounting
+    return _process_tower_records(
+        cells=cells,
+        center_lat=center_lat,
+        center_lon=center_lon,
+        query_radius=query_radius,
+        active_radios=active_radios,
+        limit=limit,
+        warnings=warnings,
+        is_cached=is_cached,
+    )
 
 
 @app.get("/api/cells")
@@ -158,11 +283,16 @@ async def get_cells(
     lat: float = Query(..., ge=-90.0, le=90.0, description="Center latitude in degrees"),
     lon: float = Query(..., ge=-180.0, le=180.0, description="Center longitude in degrees"),
     radius_m: float = Query(1000.0, gt=0, le=5000.0, description="Search radius in metres"),
+    radios: list[str] | None = Query(None, description="Radio technologies to include ('4G', '5G')"),
+    limit: int = Query(50, ge=10, le=200, description="Maximum number of towers to select (10-200)"),
+    aggregate_2m: bool = Query(False, description="Treat towers within 2 metre range as 1 tower"),
 ):
     """
     Fetch nearby cell records from OpenCellID around (lat, lon) within radius_m.
-    Maintains backward compatibility with original route.
+    Maintains backward compatibility with original route while returning full accounting and sites.
     """
+    active_radios = parse_radio_query(radios)
+
     api_key = _get_api_key()
     if not api_key:
         raise HTTPException(
@@ -172,24 +302,42 @@ async def get_cells(
 
     cells, warnings, is_cached = await fetch_opencellid_records(lat, lon, radius_m, api_key)
 
-    towers: list[dict[str, Any]] = []
-    for c in cells:
-        rec = dict(c)
-        rec["id"] = rec.get("tower_id") or rec.get("id")
-        rec["lat"] = rec.get("latitude")
-        rec["lon"] = rec.get("longitude")
-        towers.append(rec)
+    return _process_tower_records(
+        cells=cells,
+        center_lat=lat,
+        center_lon=lon,
+        query_radius=radius_m,
+        active_radios=active_radios,
+        limit=limit,
+        warnings=warnings,
+        is_cached=is_cached,
+        aggregate_2m=aggregate_2m,
+    )
 
-    return {
-        "center": {"latitude": lat, "longitude": lon},
-        "radius_m": radius_m,
-        "count": len(towers),
-        "cells": towers,
-        "towers": towers,
-        "warnings": warnings,
-        "attribution": ATTRIBUTION_TEXT,
-        "cached": is_cached,
-    }
+
+def _normalize_cell_inputs(cells_input: list[Any] | None) -> list[dict[str, Any]]:
+    """Normalize a list of CellRecord instances or dictionaries into uniform dictionaries."""
+    if not cells_input:
+        return []
+    normalized: list[dict[str, Any]] = []
+    for c in cells_input:
+        if hasattr(c, "model_dump"):
+            d = c.model_dump()
+        elif isinstance(c, dict):
+            d = dict(c)
+        else:
+            d = dict(c)
+        tid = d.get("tower_id") or d.get("id")
+        d["tower_id"] = str(tid) if tid else ""
+        d["id"] = d["tower_id"]
+        lat = d.get("latitude") if "latitude" in d else d.get("lat")
+        lon = d.get("longitude") if "longitude" in d else d.get("lon")
+        d["latitude"] = float(lat) if lat is not None else 0.0
+        d["longitude"] = float(lon) if lon is not None else 0.0
+        d["lat"] = d["latitude"]
+        d["lon"] = d["longitude"]
+        normalized.append(d)
+    return normalized
 
 
 @app.post("/api/graph/build")
@@ -199,7 +347,7 @@ async def build_graph_endpoint(request: GraphBuildRequest):
         distance(u, v) <= radius(u) + radius(v)
     Returns serializable vertices, edges, and topological metrics.
     """
-    raw_cells = request.cells or request.towers
+    raw_cells = _normalize_cell_inputs(request.cells or request.towers)
     warnings: list[str] = []
 
     # If cells are not directly provided, fetch using coordinates
@@ -211,12 +359,13 @@ async def build_graph_endpoint(request: GraphBuildRequest):
                     status_code=503,
                     detail="OpenCellID API key is not configured on the server. Please set OPENCELLID_API_KEY in .env.",
                 )
-            raw_cells, fetch_warnings, _ = await fetch_opencellid_records(
+            fetched_cells, fetch_warnings, _ = await fetch_opencellid_records(
                 request.center.latitude,
                 request.center.longitude,
                 request.radius_m,
                 api_key,
             )
+            raw_cells = _normalize_cell_inputs(fetched_cells)
             warnings.extend(fetch_warnings)
         else:
             raise HTTPException(
@@ -228,6 +377,9 @@ async def build_graph_endpoint(request: GraphBuildRequest):
     if request.tower_ids:
         id_set = set(request.tower_ids)
         raw_cells = [c for c in raw_cells if (c.get("tower_id") in id_set or c.get("id") in id_set)]
+
+    if getattr(request, "aggregate_2m", False):
+        raw_cells = aggregate_towers_within_distance(raw_cells, 2.0)
 
     if not raw_cells:
         raise HTTPException(
@@ -258,24 +410,36 @@ async def optimize_frequencies(request: OptimizeRequest):
     Build interference graph and run DSatur and Welsh–Powell optimization.
     Validates assignments, compares metrics, and returns map-ready results.
     """
-    lat = request.center.latitude
-    lon = request.center.longitude
+    raw_cells = _normalize_cell_inputs(request.cells or request.towers)
     radius_m = request.radius_m
 
     # 1. Use client-provided cell records if provided; otherwise fetch from OpenCellID
-    raw_cells = request.cells or request.towers
     if raw_cells and len(raw_cells) > 0:
         cells = raw_cells
         warnings = ["Simulated / demo cell grid."]
         is_cached = False
+        if request.center:
+            lat = request.center.latitude
+            lon = request.center.longitude
+        else:
+            lat = cells[0]["latitude"]
+            lon = cells[0]["longitude"]
     else:
+        if not request.center:
+            raise HTTPException(status_code=422, detail="Center coordinates required when cells are not provided.")
+        lat = request.center.latitude
+        lon = request.center.longitude
         api_key = _get_api_key()
         if not api_key:
             raise HTTPException(
                 status_code=503,
                 detail="OpenCellID API key is not configured on the server. Please set OPENCELLID_API_KEY in .env.",
             )
-        cells, warnings, is_cached = await fetch_opencellid_records(lat, lon, radius_m, api_key)
+        fetched, warnings, is_cached = await fetch_opencellid_records(lat, lon, radius_m, api_key)
+        cells = _normalize_cell_inputs(fetched)
+
+    if getattr(request, "aggregate_2m", False):
+        cells = aggregate_towers_within_distance(cells, 2.0)
 
     # 2. Build the interference graph and measure build time
     t0 = time.perf_counter()
@@ -367,23 +531,35 @@ async def compare_algorithms_endpoint(request: CompareRequest):
     """
     Run DSatur and Welsh–Powell on the exact same graph and return side-by-side comparison.
     """
-    lat = request.center.latitude
-    lon = request.center.longitude
     radius_m = request.radius_m
 
-    raw_cells = request.cells or request.towers
+    raw_cells = _normalize_cell_inputs(request.cells or request.towers)
     if raw_cells and len(raw_cells) > 0:
         cells = raw_cells
         warnings = ["Simulated / demo cell grid."]
         is_cached = False
+        if request.center:
+            lat = request.center.latitude
+            lon = request.center.longitude
+        else:
+            lat = cells[0]["latitude"]
+            lon = cells[0]["longitude"]
     else:
+        if not request.center:
+            raise HTTPException(status_code=422, detail="Center coordinates required when cells are not provided.")
+        lat = request.center.latitude
+        lon = request.center.longitude
         api_key = _get_api_key()
         if not api_key:
             raise HTTPException(
                 status_code=503,
                 detail="OpenCellID API key is not configured on the server. Please set OPENCELLID_API_KEY in .env.",
             )
-        cells, warnings, is_cached = await fetch_opencellid_records(lat, lon, radius_m, api_key)
+        fetched, warnings, is_cached = await fetch_opencellid_records(lat, lon, radius_m, api_key)
+        cells = _normalize_cell_inputs(fetched)
+
+    if getattr(request, "aggregate_2m", False):
+        cells = aggregate_towers_within_distance(cells, 2.0)
 
     # Build the single graph shared by both algorithms
     if request.radius_override_m is not None:

@@ -9,6 +9,16 @@ from graph_engine import (
     color_dsatur,
     color_exact_dsatur_bnb,
     optimize_graph_frequencies,
+    serialize_graph_payload,
+)
+from schemas import (
+    CellRecord,
+    GraphBuildRequest,
+    OptimizeRequest,
+    CompareRequest,
+    CenterCoordinates,
+    SiteEntity,
+    GraphMetrics,
 )
 
 
@@ -535,6 +545,225 @@ def test_graph_metrics_theoretical_bounds():
     m_iso = get_graph_metrics(g_iso)
     assert m_iso["clique_lower_bound"] == 1
     assert m_iso["brooks_upper_bound"] == 1
+
+
+# ==============================================================================
+# Milestone M2 Tests: Technology Distribution, Co-Location, Schemas & Dual Solvers
+# ==============================================================================
+
+def test_technology_distribution_homogeneous_4g():
+    """Verify metrics calculate 100% 4G distribution for 4G/LTE transceivers."""
+    cells = [
+        {"tower_id": "4G_1", "latitude": 28.520, "longitude": 77.190, "range_m": 800.0, "radio": "4G"},
+        {"tower_id": "4G_2", "latitude": 28.523, "longitude": 77.190, "range_m": 800.0, "radio": "LTE"},
+        {"tower_id": "4G_3", "latitude": 28.526, "longitude": 77.190, "range_m": 800.0, "radio": "4G LTE"},
+    ]
+    g = build_interference_graph(cells)
+    m = get_graph_metrics(g)
+    assert m["vertex_count"] == 3
+    assert m["technology_distribution"] == {"4G": 3, "5G": 0}
+    assert m["tech_distribution"] == {"4G": 3, "5G": 0}
+    assert m["co_located_pairs_count"] == 0
+    assert m["technology_distribution"]["4G"] + m["technology_distribution"]["5G"] == m["vertex_count"]
+
+
+def test_technology_distribution_homogeneous_5g():
+    """Verify metrics calculate 100% 5G distribution for 5G/NR transceivers."""
+    cells = [
+        {"tower_id": "5G_1", "latitude": 28.520, "longitude": 77.190, "range_m": 500.0, "radio": "5G"},
+        {"tower_id": "5G_2", "latitude": 28.523, "longitude": 77.190, "range_m": 500.0, "radio": "NR"},
+        {"tower_id": "5G_3", "latitude": 28.526, "longitude": 77.190, "range_m": 500.0, "radio": "5G NR"},
+    ]
+    g = build_interference_graph(cells)
+    m = get_graph_metrics(g)
+    assert m["vertex_count"] == 3
+    assert m["technology_distribution"] == {"4G": 0, "5G": 3}
+    assert m["tech_distribution"] == {"4G": 0, "5G": 3}
+    assert m["co_located_pairs_count"] == 0
+    assert m["technology_distribution"]["4G"] + m["technology_distribution"]["5G"] == m["vertex_count"]
+
+
+def test_technology_distribution_mixed_and_defaults():
+    """Verify mixed 4G and 5G records and fallback prefix normalization."""
+    cells = [
+        {"tower_id": "CELL_4G_A", "latitude": 28.520, "longitude": 77.190, "range_m": 800.0, "radio": "4G"},
+        {"tower_id": "CELL_4G_B", "latitude": 28.522, "longitude": 77.190, "range_m": 800.0, "radio": "LTE"},
+        {"tower_id": "CELL_5G_A", "latitude": 28.524, "longitude": 77.190, "range_m": 500.0, "radio": "5G"},
+        {"tower_id": "CELL_5G_B", "latitude": 28.526, "longitude": 77.190, "range_m": 500.0, "radio": "NR"},
+        {"tower_id": "5G_SITE_C", "latitude": 28.528, "longitude": 77.190, "range_m": 500.0},  # Missing radio, 5G prefix
+        {"tower_id": "SITE_D", "latitude": 28.530, "longitude": 77.190, "range_m": 800.0},     # Missing radio, defaults 4G
+    ]
+    g = build_interference_graph(cells)
+    m = get_graph_metrics(g)
+    assert m["vertex_count"] == 6
+    assert m["technology_distribution"] == {"4G": 3, "5G": 3}
+    assert m["technology_distribution"]["4G"] + m["technology_distribution"]["5G"] == m["vertex_count"]
+
+
+def test_technology_distribution_empty_graph():
+    """Verify empty graph handles technology distribution gracefully."""
+    g = build_interference_graph([])
+    m = get_graph_metrics(g)
+    assert m["vertex_count"] == 0
+    assert m["technology_distribution"] == {"4G": 0, "5G": 0}
+    assert m["tech_distribution"] == {"4G": 0, "5G": 0}
+    assert m["co_located_pairs_count"] == 0
+
+
+def test_co_located_pairs_count_in_metrics():
+    """Verify exact count of pairs sharing identical coordinates."""
+    # 3 sectors at identical lat/lon -> (3 * 2) / 2 = 3 co-located pairs
+    # 1 separate sector at different lat/lon
+    cells = [
+        {"tower_id": "SEC_1", "latitude": 28.5200, "longitude": 77.1900, "range_m": 500.0, "radio": "4G"},
+        {"tower_id": "SEC_2", "latitude": 28.5200, "longitude": 77.1900, "range_m": 500.0, "radio": "4G"},
+        {"tower_id": "SEC_3", "latitude": 28.5200, "longitude": 77.1900, "range_m": 500.0, "radio": "5G"},
+        {"tower_id": "SEC_4", "latitude": 28.5300, "longitude": 77.1900, "range_m": 500.0, "radio": "4G"},
+    ]
+    g = build_interference_graph(cells)
+    m = get_graph_metrics(g)
+    assert m["vertex_count"] == 4
+    assert m["co_located_pairs_count"] == 3
+    assert m["unique_coordinates_count"] == 2
+    assert m["technology_distribution"] == {"4G": 3, "5G": 1}
+
+
+def test_serialize_graph_payload_site_id_and_co_located():
+    """Verify serialize_graph_payload defaults radio to '4G' and includes site_id & is_co_located."""
+    cells = [
+        {
+            "tower_id": "SEC_A",
+            "latitude": 28.5200,
+            "longitude": 77.1900,
+            "range_m": 500.0,
+            "site_id": "SITE_100",
+            "is_co_located": True,
+        },
+        {
+            "tower_id": "SEC_B",
+            "latitude": 28.5250,
+            "longitude": 77.1900,
+            "range_m": 500.0,
+            # No radio specified -> should default to "4G", site_id generated
+        },
+    ]
+    g = build_interference_graph(cells)
+    payload = serialize_graph_payload(g)
+    assert len(payload["nodes"]) == 2
+
+    node_a = next(n for n in payload["nodes"] if n["id"] == "SEC_A")
+    assert node_a["site_id"] == "SITE_100"
+    assert node_a["is_co_located"] is True
+    assert node_a["radio"] == "4G"
+
+    node_b = next(n for n in payload["nodes"] if n["id"] == "SEC_B")
+    assert node_b["site_id"].startswith("SITE_")
+    assert node_b["is_co_located"] is False
+    assert node_b["radio"] == "4G"
+
+
+def test_schemas_cell_record_and_bidirectional_sync():
+    """Verify request schemas accept CellRecord instances and perform bidirectional sync."""
+    cr1 = CellRecord(tower_id="4G_01", latitude=28.52, longitude=77.19, radio="4G")
+    cr2 = CellRecord(tower_id="5G_01", latitude=28.53, longitude=77.19, radio="5G")
+
+    # 1. GraphBuildRequest accepts CellRecord objects and populates towers alias
+    req_build = GraphBuildRequest(cells=[cr1, cr2])
+    assert req_build.cells is not None
+    assert len(req_build.cells) == 2
+    assert req_build.towers == req_build.cells
+
+    # 2. GraphBuildRequest with towers populates cells
+    req_build_towers = GraphBuildRequest(towers=[cr1])
+    assert req_build_towers.cells is not None
+    assert len(req_build_towers.cells) == 1
+
+    # 3. OptimizeRequest with towers populates cells
+    req_opt = OptimizeRequest(towers=[cr1, cr2])
+    assert req_opt.cells is not None
+    assert len(req_opt.cells) == 2
+
+    # 4. CompareRequest with cells populates towers
+    req_cmp = CompareRequest(cells=[cr1])
+    assert req_cmp.towers is not None
+    assert len(req_cmp.towers) == 1
+
+    # 5. CenterCoordinates pre-populates lat/lon aliases
+    center = CenterCoordinates(**{"lat": 28.52, "lon": 77.19})
+    assert center.latitude == 28.52
+    assert center.longitude == 77.19
+
+    # 6. Sites passthrough in GraphBuildRequest
+    site = SiteEntity(
+        site_id="SITE_1",
+        latitude=28.52,
+        longitude=77.19,
+        sector_count=2,
+        sectors=["4G_01", "5G_01"],
+        radios=["4G", "5G"],
+    )
+    req_with_sites = GraphBuildRequest(cells=[cr1, cr2], sites=[site])
+    assert req_with_sites.sites is not None
+    assert len(req_with_sites.sites) == 1
+
+
+def test_validator_sensitivity_edge_conflict_detection():
+    """Verify independent validator catches color conflicts on 100% of edges."""
+    g = nx.Graph()
+    g.add_node("T1")
+    g.add_node("T2")
+    g.add_node("T3")
+    g.add_edge("T1", "T2")
+    g.add_edge("T2", "T3")
+
+    # Injected conflict: T1 and T2 share color 0
+    bad_coloring = {"T1": 0, "T2": 0, "T3": 1}
+    v = validate_coloring(g, bad_coloring)
+    assert v["is_valid"] is False
+    assert v["conflict_count"] == 1
+    assert ("T1", "T2") in v["conflicts"] or ("T2", "T1") in v["conflicts"]
+
+    # Valid coloring
+    good_coloring = {"T1": 0, "T2": 1, "T3": 0}
+    v_good = validate_coloring(g, good_coloring)
+    assert v_good["is_valid"] is True
+    assert v_good["conflict_count"] == 0
+    assert v_good["missing_count"] == 0
+
+
+def test_dual_solvers_invariance_on_identical_graph():
+    """Verify DSatur and Welsh-Powell execute on identical graph without mutating nodes or edges."""
+    import copy
+    cells = [
+        {"tower_id": f"T_{i}", "latitude": 28.520 + (i * 0.002), "longitude": 77.190, "range_m": 500.0, "radio": "4G"}
+        for i in range(8)
+    ]
+    g = build_interference_graph(cells)
+
+    nodes_snapshot = copy.deepcopy(list(g.nodes(data=True)))
+    edges_snapshot = copy.deepcopy(list(g.edges(data=True)))
+    graph_attr_snapshot = copy.deepcopy(dict(g.graph))
+
+    # Run DSatur
+    dsatur_res = color_dsatur(g)
+    assert dsatur_res["validation"]["is_valid"] is True
+    assert list(g.nodes(data=True)) == nodes_snapshot
+    assert list(g.edges(data=True)) == edges_snapshot
+    assert dict(g.graph) == graph_attr_snapshot
+
+    # Run Welsh-Powell
+    wp_res = color_welsh_powell(g)
+    assert wp_res["validation"]["is_valid"] is True
+    assert list(g.nodes(data=True)) == nodes_snapshot
+    assert list(g.edges(data=True)) == edges_snapshot
+    assert dict(g.graph) == graph_attr_snapshot
+
+    # Run Exact BnB
+    exact_res = color_exact_dsatur_bnb(g)
+    assert exact_res["validation"]["is_valid"] is True
+    assert list(g.nodes(data=True)) == nodes_snapshot
+    assert list(g.edges(data=True)) == edges_snapshot
+    assert dict(g.graph) == graph_attr_snapshot
 
 
 

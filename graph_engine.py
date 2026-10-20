@@ -8,7 +8,7 @@ import time
 from collections import Counter
 from typing import Any
 import networkx as nx
-from data_service import haversine_distance
+from data_service import haversine_distance, normalize_radio_type
 
 
 def build_interference_graph(
@@ -28,7 +28,10 @@ def build_interference_graph(
     G = nx.Graph()
 
     # 1. Add all cell records as vertices with their metadata attached
-    for cell in cells:
+    tech_distribution: dict[str, int] = {"4G": 0, "5G": 0}
+
+    for raw_cell in cells:
+        cell = raw_cell.model_dump() if hasattr(raw_cell, "model_dump") else dict(raw_cell)
         tower_id = cell.get("tower_id") or cell.get("id")
         if not tower_id:
             raise ValueError(f"Cell record missing tower_id: {cell}")
@@ -44,15 +47,37 @@ def build_interference_graph(
 
         eff_range = radius_override_m if (radius_override_m is not None and radius_override_m > 0) else float(orig_range)
 
+        # Normalize radio technology to canonical 4G or 5G
+        raw_radio = cell.get("radio")
+        norm_radio = normalize_radio_type(raw_radio) if raw_radio is not None else None
+        if norm_radio:
+            radio = norm_radio
+            assigned_radio = norm_radio
+        elif raw_radio is not None:
+            clean = str(raw_radio).strip().upper()
+            radio = "5G" if clean in ("5G", "NR") else "4G"
+            assigned_radio = raw_radio
+        elif str(tower_id).startswith("5G"):
+            radio = "5G"
+            assigned_radio = "5G"
+        else:
+            radio = "4G"
+            assigned_radio = "4G"
+
+        tech_distribution[radio] = tech_distribution.get(radio, 0) + 1
+
         node_data = dict(cell)
-        node_data["tower_id"] = tower_id
-        node_data["id"] = tower_id
+        node_data["tower_id"] = str(tower_id)
+        node_data["id"] = str(tower_id)
         node_data["latitude"] = float(lat)
         node_data["longitude"] = float(lon)
+        node_data["lat"] = float(lat)
+        node_data["lon"] = float(lon)
         node_data["range_m"] = float(orig_range)
         node_data["effective_range_m"] = eff_range
+        node_data["radio"] = assigned_radio
 
-        G.add_node(tower_id, **node_data)
+        G.add_node(str(tower_id), **node_data)
 
     # 2. Check all unique pairs for coverage circle overlap
     cell_nodes = list(G.nodes(data=True))
@@ -137,6 +162,7 @@ def build_interference_graph(
         "candidate_pairs_examined": candidate_pairs_count,
         "edges_accepted": edges_accepted,
         "edges_rejected": edges_rejected,
+        "technology_distribution": dict(tech_distribution),
         "min_radius_m": min_rad,
         "median_radius_m": med_rad,
         "max_radius_m": max_rad,
@@ -151,6 +177,7 @@ def build_interference_graph(
         "data_unsuitable": is_unsuitable,
         "data_unsuitable_reason": unsuitable_reason,
     }
+    G.graph["technology_distribution"] = dict(tech_distribution)
 
     return G
 
@@ -185,6 +212,29 @@ def get_graph_metrics(graph: nx.Graph) -> dict[str, Any]:
     diag = graph.graph.get("diagnostics", {})
     pairs_examined = diag.get("candidate_pairs_examined", (node_count * (node_count - 1)) // 2 if node_count > 1 else 0)
     edges_rejected = diag.get("edges_rejected", max(0, pairs_examined - edge_count))
+    co_located_pairs = diag.get("co_located_pairs_count", 0)
+
+    # Compute technology distribution breakdown (4G vs 5G)
+    diag_tech = diag.get("technology_distribution")
+    if (
+        isinstance(diag_tech, dict)
+        and sum(diag_tech.values()) == node_count
+        and "4G" in diag_tech
+        and "5G" in diag_tech
+    ):
+        tech_dist = {"4G": int(diag_tech.get("4G", 0)), "5G": int(diag_tech.get("5G", 0))}
+    else:
+        count_4g = 0
+        count_5g = 0
+        if node_count > 0:
+            for _, data in graph.nodes(data=True):
+                r = data.get("radio")
+                norm_r = normalize_radio_type(r) if r else None
+                if norm_r == "5G" or (r and str(r).upper() in ("5G", "NR")):
+                    count_5g += 1
+                else:
+                    count_4g += 1
+        tech_dist = {"4G": count_4g, "5G": count_5g}
 
     return {
         "node_count": node_count,
@@ -200,6 +250,9 @@ def get_graph_metrics(graph: nx.Graph) -> dict[str, Any]:
         "candidate_pairs_examined": pairs_examined,
         "edges_accepted": edge_count,
         "edges_rejected": edges_rejected,
+        "co_located_pairs_count": co_located_pairs,
+        "technology_distribution": tech_dist,
+        "tech_distribution": tech_dist,
         "unique_coordinates_count": diag.get("unique_coordinates_count", 0),
         "min_radius_m": diag.get("min_radius_m", 0.0),
         "median_radius_m": diag.get("median_radius_m", 0.0),
@@ -255,6 +308,10 @@ def serialize_graph_payload(graph: nx.Graph) -> dict[str, Any]:
         lon = data.get("longitude", data.get("lon", 0.0))
         range_m = data.get("range_m", 800.0)
         eff_range = data.get("effective_range_m", range_m)
+        r = data.get("radio")
+        norm_r = normalize_radio_type(r) if r else None
+        if not norm_r:
+            norm_r = "5G" if (r and str(r).upper() in ("5G", "NR")) else "4G"
         nodes.append({
             "id": node_id,
             "tower_id": node_id,
@@ -265,8 +322,10 @@ def serialize_graph_payload(graph: nx.Graph) -> dict[str, Any]:
             "range_m": range_m,
             "effective_range_m": eff_range,
             "degree": graph.degree(node_id),
-            "radio": data.get("radio", "LTE"),
+            "radio": norm_r,
             "cell_id": data.get("cell_id"),
+            "site_id": data.get("site_id", f"SITE_{lat:.5f}_{lon:.5f}"),
+            "is_co_located": data.get("is_co_located", False),
             "is_range_estimated": data.get("is_range_estimated", False),
             "range_source": data.get("range_source", "observed"),
         })

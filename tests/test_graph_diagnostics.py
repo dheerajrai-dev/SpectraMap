@@ -245,6 +245,9 @@ class TestDiagnosticReportingAndCoLocationNotice:
         assert "candidate_pairs_examined" in diag
         assert "edges_accepted" in diag
         assert "edges_rejected" in diag
+        assert "technology_distribution" in diag
+        assert "tech_distribution" in diag
+        assert "co_located_pairs_count" in diag
         assert "min_radius_m" in diag
         assert "median_radius_m" in diag
         assert "max_radius_m" in diag
@@ -261,6 +264,8 @@ class TestDiagnosticReportingAndCoLocationNotice:
         assert diag["min_radius_m"] == 300.0
         assert diag["max_radius_m"] == 300.0
         assert diag["data_unsuitable"] is False
+        assert diag["technology_distribution"] == {"4G": 3, "5G": 0}
+        assert diag["co_located_pairs_count"] == 0
 
     def test_co_located_cluster_detected_and_flagged_as_unsuitable(self):
         """
@@ -291,3 +296,20 @@ class TestDiagnosticReportingAndCoLocationNotice:
         assert "K_10" in metrics["data_unsuitable_reason"]
         assert metrics["min_distance_m"] == 0.0
         assert metrics["max_distance_m"] == 0.0
+        assert metrics["co_located_pairs_count"] == 45
+        assert metrics["technology_distribution"] == {"4G": 10, "5G": 0}
+
+    def test_mixed_technology_distribution_and_co_located_pairs_count(self):
+        """Verify accurate technology distribution and co-located pairs accounting with 4G and 5G."""
+        cells = [
+            {"tower_id": "4G_1", "latitude": 28.5200, "longitude": 77.1900, "range_m": 800.0, "radio": "4G"},
+            {"tower_id": "5G_1", "latitude": 28.5200, "longitude": 77.1900, "range_m": 500.0, "radio": "5G"},
+            {"tower_id": "4G_2", "latitude": 28.5250, "longitude": 77.1900, "range_m": 800.0, "radio": "LTE"},
+            {"tower_id": "5G_2", "latitude": 28.5300, "longitude": 77.1900, "range_m": 500.0, "radio": "NR"},
+        ]
+        G = build_interference_graph(cells)
+        metrics = get_graph_metrics(G)
+        assert metrics["vertex_count"] == 4
+        assert metrics["technology_distribution"] == {"4G": 2, "5G": 2}
+        assert metrics["tech_distribution"] == {"4G": 2, "5G": 2}
+        assert metrics["co_located_pairs_count"] == 1  # 4G_1 and 5G_1 share identical coordinates
