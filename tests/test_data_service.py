@@ -352,11 +352,11 @@ async def test_fetch_opencellid_records_fallback_on_network_failure(valid_raw_ce
 @pytest.mark.parametrize(
     "radio, expected_radius",
     [
-        ("GSM", 1000.0),
-        ("gsm", 1000.0),
-        ("2G", 1000.0),
-        ("CDMA", 1000.0),
-        ("cdma", 1000.0),
+        ("GSM", 800.0),
+        ("gsm", 800.0),
+        ("2G", 800.0),
+        ("CDMA", 800.0),
+        ("cdma", 800.0),
         ("UMTS", 800.0),
         ("umts", 800.0),
         ("3G", 800.0),

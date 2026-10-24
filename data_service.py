@@ -45,12 +45,6 @@ RADIO_FALLBACK_RADII: dict[str, float] = {
     RADIO_5G: 500.0,
     "LTE": 800.0,
     "NR": 500.0,
-    # Legacy fallbacks for backward compatibility
-    "GSM": 1000.0,
-    "2G": 1000.0,
-    "CDMA": 1000.0,
-    "UMTS": 800.0,
-    "3G": 800.0,
 }
 DEFAULT_FALLBACK_RADIUS: float = 800.0
 MIN_VALID_RANGE_M: float = 50.0
@@ -881,7 +875,8 @@ def aggregate_towers_within_distance(
             continue
 
         primary = cluster[0]
-        max_range = max(float(c.get("range_m", 800.0) or 800.0) for c in cluster)
+        max_sector = max(cluster, key=lambda c: float(c.get("range_m", 800.0) or 800.0))
+        max_range = float(max_sector.get("range_m", 800.0) or 800.0)
         distinct_radios = sorted(list({c.get("radio", "4G") for c in cluster}))
         rep_radio = "5G" if "5G" in distinct_radios else "4G"
 
@@ -895,6 +890,8 @@ def aggregate_towers_within_distance(
         merged_tower["lat"] = site["latitude"]
         merged_tower["lon"] = site["longitude"]
         merged_tower["range_m"] = max_range
+        merged_tower["range_source"] = max_sector.get("range_source", "reported")
+        merged_tower["fallback_reason"] = max_sector.get("fallback_reason")
         merged_tower["radio"] = rep_radio
         merged_tower["radios"] = distinct_radios
         merged_tower["sector_count"] = len(cluster)

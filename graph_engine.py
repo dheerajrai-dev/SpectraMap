@@ -14,6 +14,7 @@ from data_service import haversine_distance, normalize_radio_type
 def build_interference_graph(
     cells: list[dict[str, Any]],
     radius_override_m: float | None = None,
+    aggregate_2m: bool = False,
 ) -> nx.Graph:
     """
     Construct an undirected NetworkX graph from a list of normalized cell records.
@@ -25,6 +26,10 @@ def build_interference_graph(
       min/median/max radius, min/median/max pairwise distance, coordinate diversity,
       and data suitability.
     """
+    if aggregate_2m:
+        from data_service import aggregate_towers_within_distance
+        cells = aggregate_towers_within_distance(cells, distance_threshold_m=2.0)
+
     G = nx.Graph()
 
     # 1. Add all cell records as vertices with their metadata attached
@@ -55,8 +60,13 @@ def build_interference_graph(
             assigned_radio = norm_radio
         elif raw_radio is not None:
             clean = str(raw_radio).strip().upper()
-            radio = "5G" if clean in ("5G", "NR") else "4G"
-            assigned_radio = raw_radio
+            if clean in ("5G", "NR"):
+                radio = "5G"
+            elif clean in ("4G", "LTE", "EUTRAN"):
+                radio = "4G"
+            else:
+                radio = clean
+            assigned_radio = clean
         elif str(tower_id).startswith("5G"):
             radio = "5G"
             assigned_radio = "5G"
@@ -64,7 +74,8 @@ def build_interference_graph(
             radio = "4G"
             assigned_radio = "4G"
 
-        tech_distribution[radio] = tech_distribution.get(radio, 0) + 1
+        if radio in ("4G", "5G"):
+            tech_distribution[radio] = tech_distribution.get(radio, 0) + 1
 
         node_data = dict(cell)
         node_data["tower_id"] = str(tower_id)
@@ -158,6 +169,9 @@ def build_interference_graph(
             f"For spatial frequency-reuse demonstration across separate towers, expand search radius or use Demo Grid."
         )
 
+    coord_diversity = round(len(unique_coords) / len(cell_nodes), 4) if len(cell_nodes) > 0 else 1.0
+    max_deg_initial = max((G.degree(n) for n in G.nodes()), default=0)
+
     G.graph["diagnostics"] = {
         "candidate_pairs_examined": candidate_pairs_count,
         "edges_accepted": edges_accepted,
@@ -171,6 +185,8 @@ def build_interference_graph(
         "max_distance_m": max_dist,
         "valid_coordinates_count": len(coords),
         "unique_coordinates_count": len(unique_coords),
+        "coordinate_diversity": coord_diversity,
+        "delta_g": max_deg_initial,
         "co_located_pairs_count": co_located_pairs,
         "sample_accepted_edges": sample_accepted,
         "sample_rejected_pairs": sample_rejected,
@@ -214,6 +230,15 @@ def get_graph_metrics(graph: nx.Graph) -> dict[str, Any]:
     edges_rejected = diag.get("edges_rejected", max(0, pairs_examined - edge_count))
     co_located_pairs = diag.get("co_located_pairs_count", 0)
 
+    coord_diversity = diag.get("coordinate_diversity")
+    if coord_diversity is None:
+        if node_count > 0:
+            coords = [(data.get("latitude", data.get("lat")), data.get("longitude", data.get("lon"))) for _, data in graph.nodes(data=True)]
+            unique_c = set(coords)
+            coord_diversity = round(len(unique_c) / node_count, 4)
+        else:
+            coord_diversity = 1.0
+
     # Compute technology distribution breakdown (4G vs 5G)
     diag_tech = diag.get("technology_distribution")
     if (
@@ -243,6 +268,7 @@ def get_graph_metrics(graph: nx.Graph) -> dict[str, Any]:
         "density": round(nx.density(graph), 4) if node_count > 1 else 0.0,
         "connected_components": nx.number_connected_components(graph) if node_count > 0 else 0,
         "max_degree": max_deg,
+        "delta_g": max_deg,
         "avg_degree": avg_deg,
         "clique_lower_bound": clique_lb,
         "brooks_upper_bound": brooks_ub,
@@ -254,6 +280,7 @@ def get_graph_metrics(graph: nx.Graph) -> dict[str, Any]:
         "technology_distribution": tech_dist,
         "tech_distribution": tech_dist,
         "unique_coordinates_count": diag.get("unique_coordinates_count", 0),
+        "coordinate_diversity": coord_diversity,
         "min_radius_m": diag.get("min_radius_m", 0.0),
         "median_radius_m": diag.get("median_radius_m", 0.0),
         "max_radius_m": diag.get("max_radius_m", 0.0),
@@ -349,10 +376,19 @@ def serialize_graph_payload(graph: nx.Graph) -> dict[str, Any]:
 def validate_coloring(graph: nx.Graph, coloring: dict[Any, int]) -> dict[str, Any]:
     """
     Independently verify that a graph coloring has zero conflicts and no missing assignments.
+    Inspects 100% of graph edges.
+    Checks:
+      1. Proper vertex coloring: all vertices colored with non-negative integer.
+      2. No adjacent conflicts: for all (u, v) in E, color(u) != color(v).
+      3. Zero-distance edge inspection: pairs with distance < 1e-6m (co-located sectors).
+      4. Boundary violation inspection: edges with distance > r_u + r_v + 1e-6m (geometric violation).
     """
     conflicts: list[tuple[Any, Any]] = []
     conflicting_edges: list[dict[str, Any]] = []
     missing_nodes: list[Any] = []
+    zero_distance_edges: list[dict[str, Any]] = []
+    boundary_violations: list[dict[str, Any]] = []
+    edges_inspected = 0
 
     # 1. Assert all graph vertices have an assigned non-negative integer color
     for node in graph.nodes():
@@ -363,8 +399,29 @@ def validate_coloring(graph: nx.Graph, coloring: dict[Any, int]) -> dict[str, An
             if val is None or not isinstance(val, int) or isinstance(val, bool) or val < 0:
                 missing_nodes.append(node)
 
-    # 2. Iterate through every edge and assert adjacent vertices have distinct colors
+    # 2. Iterate through 100% of graph edges and inspect
     for u, v, data in graph.edges(data=True):
+        edges_inspected += 1
+        dist = float(data.get("distance_m", 0.0) or 0.0)
+        thresh = float(data.get("threshold_m", 0.0) or 0.0)
+
+        # Check for zero-distance edges (< 1 um = 1e-6m)
+        if dist < 1e-6:
+            zero_distance_edges.append({
+                "source": u,
+                "target": v,
+                "distance_m": dist,
+            })
+
+        # Check for boundary violation (dist > threshold + 1e-6m)
+        if thresh > 0 and dist > thresh + 1e-6:
+            boundary_violations.append({
+                "source": u,
+                "target": v,
+                "distance_m": dist,
+                "threshold_m": thresh,
+            })
+
         color_u = coloring.get(u) if coloring else None
         color_v = coloring.get(v) if coloring else None
         if color_u is not None and color_v is not None and color_u == color_v:
@@ -375,12 +432,18 @@ def validate_coloring(graph: nx.Graph, coloring: dict[Any, int]) -> dict[str, An
                 "source_id": u,
                 "target_id": v,
                 "color": color_u,
-                "distance_m": data.get("distance_m", 0.0),
-                "threshold_m": data.get("threshold_m", 0.0),
+                "distance_m": dist,
+                "threshold_m": thresh,
             })
 
-    is_valid = len(conflicts) == 0 and len(missing_nodes) == 0
     unique_colors = len({c for c in coloring.values() if isinstance(c, int) and not isinstance(c, bool) and c >= 0}) if coloring else 0
+    is_valid = (len(conflicts) == 0 and len(missing_nodes) == 0 and len(boundary_violations) == 0)
+
+    details = (
+        f"Validation inspected {edges_inspected} edges across {graph.number_of_nodes()} vertices: "
+        f"{len(conflicts)} color conflicts, {len(missing_nodes)} missing assignments, "
+        f"{len(zero_distance_edges)} zero-distance edges, {len(boundary_violations)} boundary violations."
+    )
 
     return {
         "is_valid": is_valid,
@@ -390,6 +453,14 @@ def validate_coloring(graph: nx.Graph, coloring: dict[Any, int]) -> dict[str, An
         "missing_count": len(missing_nodes),
         "missing_nodes": missing_nodes,
         "color_count": unique_colors,
+        "chi_heuristic": unique_colors,
+        "edges_inspected": edges_inspected,
+        "zero_distance_edges": zero_distance_edges,
+        "zero_distance_violations": zero_distance_edges,
+        "zero_distance_count": len(zero_distance_edges),
+        "boundary_violations": boundary_violations,
+        "boundary_violation_count": len(boundary_violations),
+        "details": details,
     }
 
 
@@ -402,18 +473,30 @@ def color_welsh_powell(graph: nx.Graph) -> dict[str, Any]:
     start_time = time.perf_counter()
 
     if graph.number_of_nodes() == 0:
+        val = validate_coloring(graph, {})
         return {
             "algorithm": "Welsh-Powell",
             "coloring": {},
             "color_count": 0,
+            "chi_heuristic": 0,
             "runtime_ms": 0.0,
-            "validation": {
-                "is_valid": True,
-                "conflict_count": 0,
-                "conflicts": [],
-                "missing_count": 0,
-                "missing_nodes": [],
-                "color_count": 0,
+            "validation": val,
+            "channel_reuse_breakdown": {},
+            "degree_ordering_stats": {
+                "ordering_sequence": [],
+                "degree_sequence": [],
+                "max_degree": 0,
+                "min_degree": 0,
+                "avg_degree": 0.0,
+                "passes_count": 0,
+            },
+            "solver_diagnostics": {
+                "ordering_sequence": [],
+                "degree_sequence": [],
+                "max_degree": 0,
+                "min_degree": 0,
+                "avg_degree": 0.0,
+                "passes_count": 0,
             },
         }
 
@@ -446,12 +529,35 @@ def color_welsh_powell(graph: nx.Graph) -> dict[str, Any]:
     runtime_ms = round((time.perf_counter() - start_time) * 1000, 3)
     validation = validate_coloring(graph, coloring)
 
+    # Collect degree ordering stats
+    ordering_seq = [str(n) for n in sorted_nodes]
+    deg_seq = [int(graph.degree(n)) for n in sorted_nodes]
+    max_d = max(deg_seq) if deg_seq else 0
+    min_d = min(deg_seq) if deg_seq else 0
+    avg_d = round(sum(deg_seq) / len(deg_seq), 2) if deg_seq else 0.0
+
+    degree_ordering_stats = {
+        "ordering_sequence": ordering_seq,
+        "degree_sequence": deg_seq,
+        "max_degree": max_d,
+        "min_degree": min_d,
+        "avg_degree": avg_d,
+        "passes_count": current_color,
+    }
+
+    color_counts = Counter(coloring.values())
+    channel_reuse_breakdown = {str(k): int(v) for k, v in sorted(color_counts.items())}
+
     return {
         "algorithm": "Welsh-Powell",
         "coloring": coloring,
         "color_count": validation["color_count"],
+        "chi_heuristic": validation["color_count"],
         "runtime_ms": runtime_ms,
         "validation": validation,
+        "channel_reuse_breakdown": channel_reuse_breakdown,
+        "degree_ordering_stats": degree_ordering_stats,
+        "solver_diagnostics": degree_ordering_stats,
     }
 
 
@@ -466,36 +572,59 @@ def color_dsatur(graph: nx.Graph) -> dict[str, Any]:
     start_time = time.perf_counter()
 
     if graph.number_of_nodes() == 0:
+        val = validate_coloring(graph, {})
         return {
             "algorithm": "DSatur",
             "coloring": {},
             "color_count": 0,
+            "chi_heuristic": 0,
             "runtime_ms": 0.0,
-            "validation": {
-                "is_valid": True,
-                "conflict_count": 0,
-                "conflicts": [],
-                "missing_count": 0,
-                "missing_nodes": [],
-                "color_count": 0,
+            "validation": val,
+            "channel_reuse_breakdown": {},
+            "saturation_stats": {
+                "selection_order": [],
+                "saturation_degrees_at_selection": [],
+                "max_saturation_degree": 0,
+                "avg_saturation_degree": 0.0,
+                "tie_break_count": 0,
+            },
+            "solver_diagnostics": {
+                "selection_order": [],
+                "saturation_degrees_at_selection": [],
+                "max_saturation_degree": 0,
+                "avg_saturation_degree": 0.0,
+                "tie_break_count": 0,
             },
         }
 
     coloring: dict[str, int] = {}
     uncolored = set(graph.nodes())
+    selection_order: list[str] = []
+    sat_degrees: list[int] = []
+    tie_break_count = 0
 
     while uncolored:
         # Select the uncolored vertex with highest saturation degree
         # Tie-breaker: highest graph degree, then alphabetical string ID
-        def dsatur_priority(node: str) -> tuple[int, int, str]:
-            neighbor_colors = {
+        priorities: list[tuple[int, int, str, Any, int]] = []
+        for node in uncolored:
+            nbr_colors = {
                 coloring[nbr] for nbr in graph.neighbors(node) if nbr in coloring
             }
-            sat_degree = len(neighbor_colors)
-            graph_degree = graph.degree(node)
-            return (-sat_degree, -graph_degree, str(node))
+            sat_deg = len(nbr_colors)
+            graph_deg = graph.degree(node)
+            priorities.append((-sat_deg, -graph_deg, str(node), node, sat_deg))
 
-        chosen_node = min(uncolored, key=dsatur_priority)
+        priorities.sort()
+        best = priorities[0]
+        chosen_node = best[3]
+        chosen_sat = best[4]
+
+        if sum(1 for p in priorities if p[4] == chosen_sat) > 1:
+            tie_break_count += 1
+
+        selection_order.append(str(chosen_node))
+        sat_degrees.append(chosen_sat)
 
         # Find the lowest available color not used by any colored neighbor
         used_colors = {
@@ -511,12 +640,30 @@ def color_dsatur(graph: nx.Graph) -> dict[str, Any]:
     runtime_ms = round((time.perf_counter() - start_time) * 1000, 3)
     validation = validate_coloring(graph, coloring)
 
+    avg_sat = round(sum(sat_degrees) / len(sat_degrees), 2) if sat_degrees else 0.0
+    max_sat = max(sat_degrees) if sat_degrees else 0
+
+    saturation_stats = {
+        "selection_order": selection_order,
+        "saturation_degrees_at_selection": sat_degrees,
+        "max_saturation_degree": max_sat,
+        "avg_saturation_degree": avg_sat,
+        "tie_break_count": tie_break_count,
+    }
+
+    color_counts = Counter(coloring.values())
+    channel_reuse_breakdown = {str(k): int(v) for k, v in sorted(color_counts.items())}
+
     return {
         "algorithm": "DSatur",
         "coloring": coloring,
         "color_count": validation["color_count"],
+        "chi_heuristic": validation["color_count"],
         "runtime_ms": runtime_ms,
         "validation": validation,
+        "channel_reuse_breakdown": channel_reuse_breakdown,
+        "saturation_stats": saturation_stats,
+        "solver_diagnostics": saturation_stats,
     }
 
 
@@ -546,6 +693,7 @@ def color_exact_dsatur_bnb(
             "algorithm": "exact_dsatur_bnb",
             "coloring": dsatur_fallback["coloring"],
             "color_count": dsatur_fallback["color_count"],
+            "chi_heuristic": dsatur_fallback["color_count"],
             "runtime_ms": elapsed_ms,
             "status": "skipped_size_limit",
             "proven_optimal": False,
@@ -553,6 +701,7 @@ def color_exact_dsatur_bnb(
             "upper_bound": dsatur_fallback["color_count"],
             "message": f"Graph size ({num_nodes} nodes) exceeds exact solver limit (max {max_nodes} nodes). Returned best heuristic coloring.",
             "validation": dsatur_fallback["validation"],
+            "channel_reuse_breakdown": dsatur_fallback.get("channel_reuse_breakdown", {}),
         }
 
     # 2. Empty graph base case
@@ -562,6 +711,7 @@ def color_exact_dsatur_bnb(
             "algorithm": "exact_dsatur_bnb",
             "coloring": {},
             "color_count": 0,
+            "chi_heuristic": 0,
             "runtime_ms": elapsed_ms,
             "status": "exact_optimal",
             "proven_optimal": True,
@@ -569,6 +719,7 @@ def color_exact_dsatur_bnb(
             "upper_bound": 0,
             "message": "Empty graph has chromatic number 0.",
             "validation": validate_coloring(graph, {}),
+            "channel_reuse_breakdown": {},
         }
 
     # 3. Initial Upper Bound (UB) from DSatur heuristic
@@ -582,10 +733,12 @@ def color_exact_dsatur_bnb(
     # If UB == LB, heuristic is proven optimal immediately (no branching needed)
     if ub == lb:
         elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        color_counts = Counter(best_coloring.values())
         return {
             "algorithm": "exact_dsatur_bnb",
             "coloring": best_coloring,
             "color_count": ub,
+            "chi_heuristic": ub,
             "runtime_ms": elapsed_ms,
             "status": "exact_optimal",
             "proven_optimal": True,
@@ -593,6 +746,7 @@ def color_exact_dsatur_bnb(
             "upper_bound": ub,
             "message": "Proven optimal chromatic number computed via DSatur branch-and-bound.",
             "validation": dsatur_init["validation"],
+            "channel_reuse_breakdown": {str(k): int(v) for k, v in sorted(color_counts.items())},
         }
 
     # 5. Root Pre-Coloring on Maximum Clique for symmetry breaking
@@ -605,10 +759,12 @@ def color_exact_dsatur_bnb(
     deadline = start_time + timeout_sec
     if time.perf_counter() > deadline:
         elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        color_counts = Counter(best_coloring.values())
         return {
             "algorithm": "exact_dsatur_bnb",
             "coloring": best_coloring,
             "color_count": ub,
+            "chi_heuristic": ub,
             "runtime_ms": elapsed_ms,
             "status": "timeout",
             "proven_optimal": False,
@@ -616,6 +772,7 @@ def color_exact_dsatur_bnb(
             "upper_bound": ub,
             "message": f"Exact solver exceeded timeout ({timeout_sec * 1000:.0f}ms). Returned best valid coloring found.",
             "validation": dsatur_init["validation"],
+            "channel_reuse_breakdown": {str(k): int(v) for k, v in sorted(color_counts.items())},
         }
 
     timed_out = False
@@ -685,10 +842,12 @@ def color_exact_dsatur_bnb(
         proven_optimal = True
         message = "Proven optimal chromatic number computed via DSatur branch-and-bound."
 
+    color_counts = Counter(best_coloring.values())
     return {
         "algorithm": "exact_dsatur_bnb",
         "coloring": best_coloring,
         "color_count": ub,
+        "chi_heuristic": ub,
         "runtime_ms": elapsed_ms,
         "status": status,
         "proven_optimal": proven_optimal,
@@ -696,6 +855,7 @@ def color_exact_dsatur_bnb(
         "upper_bound": ub,
         "message": message,
         "validation": validation,
+        "channel_reuse_breakdown": {str(k): int(v) for k, v in sorted(color_counts.items())},
     }
 
 
