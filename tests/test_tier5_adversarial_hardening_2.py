@@ -666,13 +666,7 @@ class TestFrontendIntegrationContracts:
         # Active UI element IDs queried and bound by static/app.js
         critical_element_ids = [
             "map",
-            "graph-canvas",
-            "graph-canvas-container",
-            "graph-tooltip",
             "status-badge",
-            "location-badge",
-            "tab-map-view",
-            "tab-graph-view",
             "preset-select",
             "input-lat",
             "input-lon",

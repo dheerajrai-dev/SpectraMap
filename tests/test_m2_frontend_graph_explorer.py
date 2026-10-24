@@ -60,79 +60,39 @@ def test_app_js_syntax_validity():
 
 
 def test_force_simulation_physics_implementation():
-    """Verify presence of Coulomb repulsion, Hooke springs, gravity, damping, and stability threshold."""
+    """Verify that force physics simulation loops were excised from static/app.js."""
     content = APP_JS.read_text(encoding="utf-8")
-
-    # 1. Coulomb repulsion
-    assert "stepGraphSimulation" in content
-    assert "kRep" in content or "k_rep" in content
-    assert "epsilon" in content
-    assert re.search(r"kRep\s*/\s*\(distSq\s*\+\s*epsilon\)", content) or re.search(r"/\s*\([^)]*distSq[^)]*\+[^)]*epsilon\)", content)
-
-    # 2. Hooke's spring attraction along conflict edges
-    assert "kSpring" in content or "k_spring" in content
-    assert "restLength" in content or "l_0" in content
-    assert "displacement" in content or re.search(r"dist\s*-\s*restLength", content)
-
-    # 3. Center gravity attraction
-    assert "kGrav" in content or "k_grav" in content
-    assert "centerX - u.x" in content or "centerX - node.x" in content
-
-    # 4. Velocity damping and max speed clamp
-    assert "damping" in content
-    assert re.search(r"damping\s*=\s*0\.\d+", content)
-    assert "maxSpeed" in content
-
-    # 5. Stability threshold and requestAnimationFrame
-    assert "requestAnimationFrame" in content
-    assert "startGraphSimulation" in content
-    assert "stopGraphSimulation" in content
-    assert re.search(r"maxV\s*<\s*0\.0\d+", content)
+    assert "stepGraphSimulation" not in content
+    assert "startGraphSimulation" not in content
+    assert "stopGraphSimulation" not in content
 
 
 def test_node_radius_mapped_to_degree():
-    """Verify that node radius dynamically maps to vertex degree Delta(v) in range 7px to 18px."""
+    """Verify that map-first cell rendering uses Leaflet markers rather than canvas simulation."""
     content = APP_JS.read_text(encoding="utf-8")
-
-    assert "initGraphPositionsIfNeeded" in content
-    assert "degreeMap" in content
-    assert "maxDeg" in content
-    # Look for degree ratio calculation: 7 + (deg / maxDeg) * 11
-    assert "7 + (deg / maxDeg) * 11" in content or re.search(r"7\s*\+\s*\(\s*deg\s*/\s*maxDeg\s*\)\s*\*\s*11", content)
+    assert "renderCellTowers" in content
+    assert "getFrequencyColor" in content
 
 
 def test_node_color_and_adaptive_edge_opacity():
-    """Verify node coloring by frequency channel and adaptive edge opacity."""
+    """Verify node coloring by frequency channel on Leaflet map markers and coverage circles."""
     content = APP_JS.read_text(encoding="utf-8")
-
     assert "getFrequencyColor" in content
-    assert "getAdaptiveEdgeStyle" in content
-    assert "drawGraphCanvas" in content
-    assert "rgba(245, 158, 11" in content  # Amber incident glow
+    assert "renderCellTowers" in content
+    assert "coverageCirclesById" in content
 
 
 def test_interactive_node_dragging():
-    """Verify interactive mouse dragging and relaxation in initGraphCanvasInteractions."""
+    """Verify interactive canvas dragging was excised in favor of map pan/drag."""
     content = APP_JS.read_text(encoding="utf-8")
-
-    assert "initGraphCanvasInteractions" in content
-    assert "mousedown" in content
-    assert "mousemove" in content
-    assert "mouseup" in content
-    assert "isPinned" in content
-    assert "draggedNodeId" in content
-    assert "graph-canvas-dragging" in content
+    assert "initGraphCanvasInteractions" not in content
 
 
 def test_view_switching_state_preservation_and_sync():
-    """Verify seamless view switching calls updateMapVisualStyles and map.invalidateSize."""
+    """Verify map-first workspace maintains updated map visuals and stable coordinates."""
     content = APP_JS.read_text(encoding="utf-8")
-
-    assert "switchVisualizationView" in content
-    # Switching to map must stop simulation and call updateMapVisualStyles
-    assert "stopGraphSimulation" in content
     assert "updateMapVisualStyles" in content
-    assert "invalidateSize" in content
+    assert "renderCellTowers" in content
 
 
 def test_benchmark_dashboard_channel_reuse_breakdown():
@@ -177,11 +137,8 @@ def test_no_unguarded_get_element_by_id_property_access():
 
 
 def test_css_styles_for_dragging_and_reuse():
-    """Verify style.css contains classes for grabbing cursor and solver reuse breakdown."""
+    """Verify style.css contains solver reuse breakdown and responsive legend styling."""
     css = STYLE_CSS.read_text(encoding="utf-8")
-
-    assert "#graph-canvas.graph-canvas-dragging" in css
-    assert "cursor: grabbing" in css
     assert ".solver-reuse-breakdown" in css
     assert ".reuse-channel-chips" in css
     assert ".reuse-chip" in css

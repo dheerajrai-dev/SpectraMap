@@ -325,12 +325,11 @@ def test_scenario_08_view_switching_and_dom_safety(client):
     assert resp_root.status_code == 200
     html = resp_root.text
 
-    # 2. Verify all necessary view switching tabs and containers are present
-    assert 'id="tab-map-view"' in html
-    assert 'id="tab-graph-view"' in html
+    # 2. Verify map is the primary workspace and graph canvas view is excised
     assert 'id="map"' in html
-    assert 'id="graph-canvas-container"' in html
-    assert 'id="graph-canvas"' in html
+    assert 'id="graph-canvas-container"' not in html
+    assert 'id="graph-canvas"' not in html
+    assert 'id="tab-graph-view"' not in html
 
     # 3. Verify static JavaScript is served cleanly
     resp_js = client.get("/static/app.js")
@@ -338,13 +337,12 @@ def test_scenario_08_view_switching_and_dom_safety(client):
     js = resp_js.text
 
     # 4. Confirm key handler methods exist in JavaScript
-    assert "updateMapVisualStyles" in js or "invalidateSize" in js
-    assert "switchTab" in js or "tab-graph-view" in js
+    assert "updateMapVisualStyles" in js or "invalidateSize" in js or "initMap" in js
 
     # 5. Confirm style.css defines both view layers
     resp_css = client.get("/static/style.css")
     assert resp_css.status_code == 200
-    assert ".viewport-layer" in resp_css.text
+    assert "#map" in resp_css.text
 
 
 # ============================================================================
