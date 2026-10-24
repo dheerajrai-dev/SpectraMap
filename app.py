@@ -34,22 +34,17 @@ from graph_engine import (
     color_dsatur,
     color_welsh_powell,
     color_exact_dsatur_bnb,
-    validate_coloring,
     optimize_graph_frequencies,
     get_graph_metrics,
     get_interference_edges,
     serialize_graph_payload,
 )
 from schemas import (
-    CenterCoordinates,
     GraphBuildRequest,
     OptimizeRequest,
     CompareRequest,
     AccountingMetadata,
-    CellRecord,
-    SiteEntity,
-    TowersResponse,
-    GraphMetrics,
+    EDUCATIONAL_DISCLAIMER_DEFAULT,
 )
 
 # Load environment variables from .env file
@@ -167,12 +162,14 @@ def _process_tower_records(
             eligible_records.append(rec)
     eligible_count = len(eligible_records)
 
-    selected_records = select_spatially_dispersed_records(
-        eligible_records, center_lat, center_lon, limit=limit
-    )
-
     if aggregate_2m:
-        selected_records = aggregate_towers_within_distance(selected_records, 2.0)
+        records_to_sample = aggregate_towers_within_distance(eligible_records, 2.0)
+    else:
+        records_to_sample = eligible_records
+
+    selected_records = select_spatially_dispersed_records(
+        records_to_sample, center_lat, center_lon, limit=limit
+    )
 
     selected_count = len(selected_records)
 
@@ -227,6 +224,7 @@ async def get_towers(
     north: float | None = Query(None, ge=-90.0, le=90.0, description="Bounding box north latitude"),
     radios: list[str] | None = Query(None, description="Radio technologies to include ('4G', '5G')"),
     limit: int = Query(50, ge=10, le=200, description="Maximum number of towers to select (10-200)"),
+    aggregate_2m: bool = Query(False, description="Treat towers within 2 metre range as 1 tower"),
 ):
     """
     Fetch and validate tower records within the given radius or bounding box.
@@ -275,6 +273,7 @@ async def get_towers(
         limit=limit,
         warnings=warnings,
         is_cached=is_cached,
+        aggregate_2m=aggregate_2m,
     )
 
 
@@ -366,6 +365,7 @@ async def build_graph_endpoint(request: GraphBuildRequest):
                 api_key,
             )
             raw_cells = _normalize_cell_inputs(fetched_cells)
+            raw_cells = [c for c in raw_cells if normalize_radio_type(c.get("radio")) in ("4G", "5G")]
             warnings.extend(fetch_warnings)
         else:
             raise HTTPException(
@@ -400,6 +400,7 @@ async def build_graph_endpoint(request: GraphBuildRequest):
         warnings.append(payload["metrics"]["data_unsuitable_reason"])
     payload["warnings"] = warnings
     payload["diagnostics"] = payload.get("metrics")
+    payload["educational_disclaimer"] = dict(EDUCATIONAL_DISCLAIMER_DEFAULT)
 
     return payload
 
@@ -437,6 +438,7 @@ async def optimize_frequencies(request: OptimizeRequest):
             )
         fetched, warnings, is_cached = await fetch_opencellid_records(lat, lon, radius_m, api_key)
         cells = _normalize_cell_inputs(fetched)
+        cells = [c for c in cells if normalize_radio_type(c.get("radio")) in ("4G", "5G")]
 
     if getattr(request, "aggregate_2m", False):
         cells = aggregate_towers_within_distance(cells, 2.0)
@@ -505,6 +507,11 @@ async def optimize_frequencies(request: OptimizeRequest):
     if opt_results["metrics"].get("data_unsuitable_reason"):
         warnings.append(opt_results["metrics"]["data_unsuitable_reason"])
 
+    solver_diag = {}
+    best_key = opt_results["best_algorithm"].lower().replace("-", "_").replace(" ", "_")
+    if isinstance(opt_results.get(best_key), dict):
+        solver_diag = opt_results[best_key].get("solver_diagnostics", {})
+
     return {
         "result_id": result_id,
         "center": {"latitude": lat, "longitude": lon},
@@ -515,14 +522,19 @@ async def optimize_frequencies(request: OptimizeRequest):
         "graph_build_runtime_ms": graph_build_ms,
         "algorithm": request.algorithm,
         "assignments": assignments,
+        "colors_used": color_count,
+        "chi_heuristic": color_count,
+        "runtime_ms": runtime_ms,
         "metrics": opt_results["metrics"],
         "diagnostics": opt_results["metrics"],
         "best_algorithm": opt_results["best_algorithm"],
+        "solver_diagnostics": solver_diag,
         "dsatur": opt_results["dsatur"],
         "welsh_powell": opt_results["welsh_powell"],
         "exact": opt_results["exact"],
         "validation": validation,
         "edges": edges,
+        "educational_disclaimer": dict(EDUCATIONAL_DISCLAIMER_DEFAULT),
     }
 
 
@@ -557,6 +569,7 @@ async def compare_algorithms_endpoint(request: CompareRequest):
             )
         fetched, warnings, is_cached = await fetch_opencellid_records(lat, lon, radius_m, api_key)
         cells = _normalize_cell_inputs(fetched)
+        cells = [c for c in cells if normalize_radio_type(c.get("radio")) in ("4G", "5G")]
 
     if getattr(request, "aggregate_2m", False):
         cells = aggregate_towers_within_distance(cells, 2.0)
@@ -593,6 +606,7 @@ async def compare_algorithms_endpoint(request: CompareRequest):
         "dsatur": dsatur_res,
         "welsh_powell": wp_res,
         "exact": exact_res,
+        "agreement": (dsatur_res["color_count"] == wp_res["color_count"]),
         "comparison": {
             "colors_difference": color_diff,
             "faster_heuristic": "Welsh-Powell" if wp_res["runtime_ms"] < dsatur_res["runtime_ms"] else "DSatur",
@@ -601,4 +615,5 @@ async def compare_algorithms_endpoint(request: CompareRequest):
         },
         "edges": get_interference_edges(graph),
         "warnings": warnings,
+        "educational_disclaimer": dict(EDUCATIONAL_DISCLAIMER_DEFAULT),
     }
