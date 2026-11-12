@@ -10,6 +10,7 @@ const state = {
     cells: [], allFetchedCells: [], interferenceEdges: [], graphMetrics: null,
     adjacencyIndex: {}, degreeMap: {}, optimizationResults: null, currentAssignments: null,
     activeIsolatedFreq: null, pipelineState: "Connecting", aggregate2m: true,
+    coverageOpacity: 0.18,
     map: null, centerMarker: null, centerCircle: null, markersLayer: null, circlesLayer: null,
     markersById: {}, coverageCirclesById: {},
 };
@@ -27,10 +28,7 @@ function setElemHtml(id, html) {
     if (el) el.innerHTML = html;
 }
 
-function on(id, evt, fn) {
-    const el = document.getElementById(id);
-    if (el) el.addEventListener(evt, fn);
-}
+function on(id, evt, fn) { const el = document.getElementById(id); if (el) el.addEventListener(evt, fn); }
 
 const BASE_FREQUENCY_COLORS = [
     "#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4",
@@ -64,6 +62,8 @@ function initMap() {
     }).addTo(state.map);
     state.circlesLayer = L.layerGroup().addTo(state.map);
     state.markersLayer = L.layerGroup().addTo(state.map);
+    const map = state.map;
+    map.on("click", (e) => { setNewCenter(e.latlng.lat, e.latlng.lng, null, "Map Click"); invalidateOptimizationState("Map clicked"); fetchNearbyCells(); });
     updateCenterVisuals();
 }
 
@@ -71,12 +71,10 @@ function updateCenterVisuals() {
     if (!state.map) return;
     const latlng = [state.currentCenter.lat, state.currentCenter.lon];
     if (!state.centerMarker) {
-        const centerIcon = L.divIcon({
-            html: '<div style="width:14px;height:14px;background:#3b82f6;border:2.5px solid #ffffff;border-radius:50%;box-shadow:0 0 10px rgba(59,130,246,0.9);cursor:move;"></div>',
-            className: "center-pin-icon", iconSize: [14, 14], iconAnchor: [7, 7],
-        });
-        state.centerMarker = L.marker(latlng, { icon: centerIcon, draggable: true }).addTo(state.map);
-        state.centerMarker.on("dragend", (e) => { const p = e.target.getLatLng(); setNewCenter(p.lat, p.lng, null, "Custom Pin"); fetchNearbyCells(); });
+        const centerIcon = L.divIcon({ html: '<div style="width:14px;height:14px;background:#3b82f6;border:2.5px solid #ffffff;border-radius:50%;box-shadow:0 0 10px rgba(59,130,246,0.9);cursor:move;"></div>', className: "center-pin-icon", iconSize: [14, 14], iconAnchor: [7, 7] });
+        const centerMarker = L.marker(latlng, { icon: centerIcon, draggable: true }).addTo(state.map);
+        centerMarker.on("dragend", (e) => { const p = e.target.getLatLng(); setNewCenter(p.lat, p.lng, null, "Custom Pin"); invalidateOptimizationState("Marker dragged"); fetchNearbyCells(); });
+        state.centerMarker = centerMarker;
     } else {
         state.centerMarker.setLatLng(latlng);
     }
@@ -90,36 +88,70 @@ function updateCenterVisuals() {
     setElemText("center-lon-display", state.currentCenter.lon.toFixed(5));
 }
 
+const PRESET_LOCATIONS = {
+    south_delhi: { lat: 28.5224, lon: 77.1906, zoom: 14, name: "South Delhi" },
+    connaught_place: { lat: 28.6304, lon: 77.2177, zoom: 14, name: "Connaught Place" },
+    mumbai: { lat: 18.9430, lon: 72.8250, zoom: 14, name: "Mumbai" },
+};
+
+function clearLoadedCells() {
+    state.cells = []; state.allFetchedCells = []; state.interferenceEdges = []; state.adjacencyIndex = {}; state.degreeMap = {}; state.selectedTowerId = null;
+    state.markersById = {}; state.coverageCirclesById = {};
+    if (state.markersLayer) state.markersLayer.clearLayers();
+    if (state.circlesLayer) state.circlesLayer.clearLayers();
+    updateAccountingDisplay({ available_count: 0, eligible_count: 0, selected_count: 0, excluded_count: 0 });
+    renderAssignmentTable(null, []); closeVertexInspector();
+}
+
 function setNewCenter(lat, lon, zoom = null, locationName = "") {
     state.currentCenter = { lat, lon };
     const latInp = document.getElementById("input-lat"), lonInp = document.getElementById("input-lon");
     if (latInp) latInp.value = lat.toFixed(5);
     if (lonInp) lonInp.value = lon.toFixed(5);
+    const overlay = document.getElementById("map-overlay");
+    if (overlay) overlay.textContent = `Center: ${lat.toFixed(5)}°, ${lon.toFixed(5)}° (${locationName || "Custom Pin"})`;
     if (state.map) { if (zoom) state.map.setView([lat, lon], zoom); else state.map.panTo([lat, lon]); }
-    updateCenterVisuals();
-    invalidateOptimizationState("Location changed");
+    updateCenterVisuals(); clearLoadedCells(); invalidateOptimizationState("Location changed");
 }
 
 function initControls() {
-    if (typeof document.querySelectorAll === "function") {
-        document.querySelectorAll(".btn-preset").forEach((btn) => {
-            btn.addEventListener("click", () => {
-                const lat = parseFloat(btn.dataset.lat), lon = parseFloat(btn.dataset.lon), zoom = parseInt(btn.dataset.zoom, 10) || 14;
-                document.querySelectorAll(".btn-preset").forEach((b) => b.classList.remove("active"));
-                btn.classList.add("active");
-                setNewCenter(lat, lon, zoom, btn.textContent.trim());
-            });
-        });
-    }
+    const presetSelect = document.getElementById("preset-select");
+    if (presetSelect) presetSelect.addEventListener("change", (e) => { invalidateOptimizationState("Preset location changed"); const p = PRESET_LOCATIONS[e.target.value]; if (p) { setNewCenter(p.lat, p.lon, p.zoom, p.name); fetchNearbyCells(); } });
 
-    on("input-lat", "change", (e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setNewCenter(v, state.currentCenter.lon, null, "Custom"); });
-    on("input-lon", "change", (e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setNewCenter(state.currentCenter.lat, v, null, "Custom"); });
-    on("radius-slider", "input", (e) => { const r = parseInt(e.target.value, 10); state.radiusMetres = r; setElemText("radius-label", `${r.toLocaleString()}`); updateCenterVisuals(); invalidateOptimizationState("Radius changed"); });
-    on("check-tech-4g", "change", (e) => { if (e.target.checked) state.selectedRadios.add("4G"); else state.selectedRadios.delete("4G"); applyClientSideRadioFilter(); });
-    on("check-tech-5g", "change", (e) => { if (e.target.checked) state.selectedRadios.add("5G"); else state.selectedRadios.delete("5G"); applyClientSideRadioFilter(); });
-    on("limit-slider", "input", (e) => { const l = parseInt(e.target.value, 10); state.maxTowersLimit = l; setElemText("limit-label", `${l}`); applyClientSideLimitSlicing(); });
-    on("override-slider", "input", (e) => { const c = parseInt(e.target.value, 10); state.coverageRadiusOverride = c; setElemText("override-label", c === 0 ? "Data Default" : `${c} m`); invalidateOptimizationState("Coverage override changed"); });
-    on("check-aggregate-2m", "change", (e) => { state.aggregate2m = Boolean(e.target.checked); invalidateOptimizationState("2m mast aggregation toggled"); });
+    const inputLat = document.getElementById("input-lat");
+    if (inputLat) inputLat.addEventListener("change", (e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) { invalidateOptimizationState("Coordinate changed"); setNewCenter(v, state.currentCenter.lon, null, "Custom"); } });
+
+    const inputLon = document.getElementById("input-lon");
+    if (inputLon) inputLon.addEventListener("change", (e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) { invalidateOptimizationState("Coordinate changed"); setNewCenter(state.currentCenter.lat, v, null, "Custom"); } });
+
+    const radiusSlider = document.getElementById("radius-slider");
+    if (radiusSlider) { const h = (e) => { state.radiusMetres = parseInt(e.target.value, 10); setElemText("radius-label", `${state.radiusMetres.toLocaleString()}`); updateCenterVisuals(); invalidateOptimizationState("Radius changed"); }; radiusSlider.addEventListener("input", h); radiusSlider.addEventListener("change", h); }
+
+    function handleTechChange(radio, checked) { if (checked) state.selectedRadios.add(radio); else state.selectedRadios.delete(radio); invalidateOptimizationState("Radio filter modified"); applyClientSideRadioFilter(); }
+    on("check-tech-4g", "change", (e) => handleTechChange("4G", e.target.checked));
+    on("check-tech-5g", "change", (e) => handleTechChange("5G", e.target.checked));
+
+    const limitSlider = document.getElementById("limit-slider");
+    if (limitSlider) limitSlider.addEventListener("input", (e) => { state.maxTowersLimit = parseInt(e.target.value, 10); setElemText("limit-label", `${state.maxTowersLimit}`); invalidateOptimizationState("Limit modified"); applyClientSideLimitSlicing(); });
+
+    const overrideSlider = document.getElementById("override-slider");
+    if (overrideSlider) { const h = (e) => { state.coverageRadiusOverride = parseInt(e.target.value, 10); setElemText("override-label", state.coverageRadiusOverride === 0 ? "Data Default" : `${state.coverageRadiusOverride} m`); invalidateOptimizationState("Coverage override changed"); }; overrideSlider.addEventListener("input", h); overrideSlider.addEventListener("change", h); }
+
+    const chkAgg2m = document.getElementById("check-aggregate-2m");
+    if (chkAgg2m) chkAgg2m.addEventListener("change", (e) => { state.aggregate2m = Boolean(e.target.checked); invalidateOptimizationState("2m mast aggregation toggled"); });
+
+    on("opacity-slider", "input", (e) => {
+        const val = parseInt(e.target.value, 10);
+        state.coverageOpacity = val / 100.0;
+        setElemText("opacity-label", `${val}%`);
+        if (state.coverageCirclesById) {
+            const algoKey = typeof getSelectedAlgoKey === "function" ? getSelectedAlgoKey() : "dsatur";
+            const coloring = state.optimizationResults?.[algoKey]?.coloring || {};
+            Object.entries(state.coverageCirclesById).forEach(([tid, circle]) => {
+                circle.setStyle({ fillOpacity: coloring[tid] !== undefined ? state.coverageOpacity : 0.0 });
+            });
+        }
+    });
 
     on("btn-fetch", "click", () => fetchNearbyCells());
     on("btn-build-graph", "click", () => buildInterferenceGraphUI(true));
@@ -150,65 +182,54 @@ function setPipelineButtonsDisabled(fetchDis, buildDis, optDis, compareDis) {
 function setPipelineState(stateName, details = "") {
     state.pipelineState = stateName;
     const badge = document.getElementById("status-badge"), msg = document.getElementById("cells-status");
+    const setHtml = (id, h) => { const el = document.getElementById(id); if (el) el.innerHTML = h; };
     switch (stateName) {
         case "Connecting":
             setPipelineButtonsDisabled(true, true, true, true);
             if (badge) { badge.textContent = "Connecting..."; badge.className = "badge badge-loading"; }
-            if (msg) msg.textContent = details || "Connecting to SpectraMap backend..."; break;
+            if (msg) { msg.textContent = details || "Connecting to SpectraMap backend..."; msg.style.color = "var(--text-secondary)"; } break;
         case "Fetching":
             setPipelineButtonsDisabled(true, true, true, true);
-            setElemHtml("btn-fetch", '<span class="spinner">⏳</span> Fetching...');
-            if (msg) msg.textContent = details || "Querying 4G/5G cell records..."; break;
+            setHtml("btn-fetch", '<span class="spinner">⏳</span> Fetching...');
+            if (msg) { msg.textContent = details || "Querying 4G/5G cell records..."; msg.style.color = "var(--text-secondary)"; } break;
         case "Building Graph":
             setPipelineButtonsDisabled(true, true, true, true);
-            setElemHtml("btn-build-graph", '<span class="spinner">⏳</span> Building...');
-            if (msg) msg.textContent = details || "Constructing interference graph..."; break;
+            setHtml("btn-build-graph", '<span class="spinner">⏳</span> Building...');
+            if (msg) { msg.textContent = details || "Constructing interference graph..."; msg.style.color = "var(--text-secondary)"; } break;
         case "Optimizing":
             setPipelineButtonsDisabled(true, true, true, true);
-            setElemHtml("btn-optimize", '<span class="spinner">⏳</span> Optimizing...');
-            if (msg) msg.textContent = details || "Running graph coloring heuristics..."; break;
+            setHtml("btn-optimize", '<span class="spinner">⏳</span> Optimizing...');
+            if (msg) { msg.textContent = details || "Running graph coloring heuristics..."; msg.style.color = "var(--text-secondary)"; } break;
         case "Validating":
             setPipelineButtonsDisabled(true, true, true, true);
-            setElemHtml("btn-optimize", '<span class="spinner">⏳</span> Validating...');
-            if (msg) msg.textContent = details || "Validating independent set assignments..."; break;
+            setHtml("btn-optimize", '<span class="spinner">⏳</span> Validating...');
+            if (msg) { msg.textContent = details || "Validating independent set assignments..."; msg.style.color = "var(--text-secondary)"; } break;
         case "Completed":
             setPipelineButtonsDisabled(false, false, false, false);
-            setElemHtml("btn-fetch", '<span class="btn-icon">📡</span> Fetch Records');
-            setElemHtml("btn-build-graph", '<span class="btn-icon">🕸️</span> Build Graph');
-            setElemHtml("btn-optimize", '<span class="btn-icon">⚡</span> Optimize Frequencies');
+            setHtml("btn-fetch", '<span class="btn-icon">📡</span> Fetch Records'); setHtml("btn-build-graph", '<span class="btn-icon">🕸️</span> Build Graph'); setHtml("btn-optimize", '<span class="btn-icon">⚡</span> Optimize Frequencies');
             if (msg) { msg.textContent = details || "Completed."; msg.style.color = "var(--accent-emerald)"; } break;
         case "Failed":
         default:
             const hasCells = Boolean(state.cells && state.cells.length);
             setPipelineButtonsDisabled(false, !hasCells, !hasCells, !hasCells);
-            setElemHtml("btn-fetch", '<span class="btn-icon">📡</span> Fetch Records');
-            setElemHtml("btn-build-graph", '<span class="btn-icon">🕸️</span> Build Graph');
-            setElemHtml("btn-optimize", '<span class="btn-icon">⚡</span> Optimize Frequencies');
+            setHtml("btn-fetch", '<span class="btn-icon">📡</span> Fetch Records'); setHtml("btn-build-graph", '<span class="btn-icon">🕸️</span> Build Graph'); setHtml("btn-optimize", '<span class="btn-icon">⚡</span> Optimize Frequencies');
             if (msg) { msg.textContent = details || "Operation failed."; msg.style.color = "var(--accent-rose)"; } break;
     }
 }
 
 function invalidateOptimizationState(reason = "") {
-    state.optimizationResults = null;
-    state.currentAssignments = null;
-    state.activeIsolatedFreq = null;
-
+    state.optimizationResults = null; state.currentAssignments = null; state.activeIsolatedFreq = null; state.isolatedFrequency = null;
     const legendContainer = document.getElementById("legend-container");
     if (legendContainer) legendContainer.style.display = "none";
-
     const valBadge = document.getElementById("metric-validation-badge");
     if (valBadge) { valBadge.className = "badge-validation badge-val-waiting"; valBadge.textContent = state.cells.length > 0 ? "Awaiting Run" : "Awaiting Data"; }
-
-    ["pill-dsatur", "pill-wp", "pill-exact"].forEach((id) => {
-        document.getElementById(id)?.classList.remove("best-algo-pill");
-    });
+    ["pill-dsatur", "pill-wp", "pill-exact"].forEach((id) => document.getElementById(id)?.classList.remove("best-algo-pill"));
 
     if (state.coverageCirclesById) {
         Object.values(state.coverageCirclesById).forEach((circle) => {
             circle.setStyle({ fill: false, fillColor: "#3b82f6", fillOpacity: 0.0, color: "#64748b", weight: 1.5, opacity: 0.35 });
         });
     }
-
     if (state.cells && Array.isArray(state.cells)) {
         state.cells.forEach((cell) => {
             const markerEl = document.getElementById(`marker-circle-${cell.tower_id}`);
@@ -218,22 +239,15 @@ function invalidateOptimizationState(reason = "") {
             }
         });
     }
-
     renderAssignmentTable(null, state.cells);
     const panel = document.getElementById("assignment-panel");
     if (panel) panel.style.display = "none";
-
     updateDashboardMetrics(null, null, null, state.cells);
     renderEmbeddedComparisonCard();
-
     if (state.selectedTowerId && typeof openVertexInspector === "function") openVertexInspector(state.selectedTowerId);
-
     if (reason) {
         const statusMsg = document.getElementById("cells-status");
-        if (statusMsg) {
-            statusMsg.textContent = `${reason}. Optimization reset. Click 'Optimize Frequencies' to solve.`;
-            statusMsg.style.color = "var(--text-secondary)";
-        }
+        if (statusMsg) { statusMsg.textContent = `${reason}. Optimization reset. Click 'Optimize Frequencies' to solve.`; statusMsg.style.color = "var(--text-secondary)"; }
     }
 }
 
@@ -253,16 +267,16 @@ function renderAssignmentTable(assignments, cells) {
 
     const algoKey = typeof getSelectedAlgoKey === "function" ? getSelectedAlgoKey() : "dsatur";
     const coloring = assignments || state.optimizationResults?.[algoKey]?.coloring || null;
+    if (coloring) state.currentAssignments = coloring;
 
     const rows = cells.map((cell) => {
         const tid = cell.tower_id, colorIdx = coloring && coloring[tid] !== undefined ? Number(coloring[tid]) : null;
-        const freqColor = colorIdx !== null ? getFrequencyColor(colorIdx) : "#64748b";
-        const freqText = colorIdx !== null ? `f${colorIdx + 1}` : "—";
+        const freqColor = colorIdx !== null ? getFrequencyColor(colorIdx) : "#64748b", freqText = colorIdx !== null ? `f${colorIdx + 1}` : "—";
         const degree = state.degreeMap?.[tid] ?? "0", isSelected = state.selectedTowerId === tid ? " selected-row" : "";
-        const radiusM = Math.round(Number(cell.range_m) || 800);
+        const radiusM = Math.round(Number(cell.range_m) || 800), shortTid = tid.length > 18 ? `${tid.slice(0, 10)}…${tid.slice(-4)}` : tid;
         return `<tr class="assignment-row${isSelected}" data-tower-id="${tid}" onclick="selectCellFromTable('${tid}')">` +
             `<td><span class="cell-label-pill" style="border-color:${freqColor}; color:${freqColor};">${cell.label}</span></td>` +
-            `<td class="font-mono text-xs" title="${tid}">${tid}</td>` +
+            `<td class="font-mono text-xs" title="${tid}">${shortTid}</td>` +
             `<td><span class="badge-tech-${cell.radio.toLowerCase()}">${cell.radio}</span></td>` +
             `<td><span class="badge-channel" style="border-color:${freqColor}; color:${freqColor};"><span class="channel-dot" style="background:${freqColor};"></span>${freqText}</span></td>` +
             `<td class="font-mono text-xs">${radiusM} m</td>` +
@@ -284,8 +298,7 @@ function selectCellFromTable(towerId) {
 
 function updateAssignmentTableRowSelection(towerId) {
     if (typeof document.querySelectorAll !== "function") return;
-    const rows = document.querySelectorAll(".assignment-row");
-    rows.forEach((row) => {
+    document.querySelectorAll(".assignment-row").forEach((row) => {
         if (towerId && row.dataset.towerId === towerId) {
             row.classList.add("selected-row");
             if (typeof row.scrollIntoView === "function") row.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -295,39 +308,65 @@ function updateAssignmentTableRowSelection(towerId) {
     });
 }
 
-function applyAssignmentTableFilters() {
-    const searchInput = document.getElementById("assignment-search");
-    const term = searchInput ? searchInput.value.trim().toLowerCase() : "";
-    if (typeof document.querySelectorAll !== "function") return;
-    const rows = document.querySelectorAll(".assignment-row");
+function applyAssignmentTableFilters(e) {
+    const el1 = document.getElementById("assignment-search-input"), el2 = document.getElementById("assignment-search");
+    const rawVal = (e?.target?.value) || (el2 && el2.value) || (el1 && el1.value) || "";
+    const term = rawVal.trim().toLowerCase();
+    state.assignmentSearchQuery = term;
+    const b1 = document.getElementById("btn-clear-assignment-search"), b2 = document.getElementById("btn-assignment-search-clear");
+    const displayStyle = term ? "inline-block" : "none";
+    if (b1) b1.style.display = displayStyle;
+    if (b2) b2.style.display = displayStyle;
+    const tbody = document.getElementById("assignment-table-body");
+    let rows = (tbody && tbody.querySelectorAll) ? Array.from(tbody.querySelectorAll(".assignment-row")) : [];
+    if (rows.length === 0 && typeof document.querySelectorAll === "function") {
+        rows = Array.from(document.querySelectorAll(".assignment-row"));
+    }
+    let visibleCount = 0;
     rows.forEach((row) => {
-        const text = row.textContent.toLowerCase();
-        row.style.display = term === "" || text.includes(term) ? "" : "none";
+        const text = (row.textContent || "").toLowerCase();
+        const ds = row.dataset || {};
+        const dataStr = Object.values(ds).join(" ").toLowerCase() + (ds.channel ? ` f${ds.channel}` : "");
+        const full = text + " " + dataStr;
+        const match = term === "" || full.includes(term);
+        row.style.display = match ? "" : "none";
+        if (match) visibleCount++;
     });
+    const countBadge = document.getElementById("assignment-count-badge");
+    if (countBadge && rows.length > 0) {
+        countBadge.textContent = term ? `${visibleCount} / ${rows.length} cells` : (countBadge.textContent.includes("cells") ? `${rows.length} cells` : String(rows.length));
+    }
 }
 
 function initAssignmentTableEvents() {
-    const searchInput = document.getElementById("assignment-search");
-    const btnClear = document.getElementById("btn-assignment-search-clear");
-    if (searchInput) searchInput.addEventListener("input", applyAssignmentTableFilters);
-    if (btnClear) {
-        btnClear.addEventListener("click", () => {
-            if (searchInput) {
-                searchInput.value = "";
-                applyAssignmentTableFilters();
-                searchInput.focus();
-            }
-        });
-    }
+    const el1 = document.getElementById("assignment-search-input"), el2 = document.getElementById("assignment-search");
+    if (el1) el1.addEventListener("input", applyAssignmentTableFilters);
+    if (el2) el2.addEventListener("input", applyAssignmentTableFilters);
+    const onClear = () => {
+        if (el1) el1.value = "";
+        if (el2) el2.value = "";
+        state.assignmentSearchQuery = "";
+        const b1 = document.getElementById("btn-clear-assignment-search"), b2 = document.getElementById("btn-assignment-search-clear");
+        if (b1) b1.style.display = "none";
+        if (b2) b2.style.display = "none";
+        const tbody = document.getElementById("assignment-table-body");
+        let rows = (tbody && tbody.querySelectorAll) ? Array.from(tbody.querySelectorAll(".assignment-row")) : [];
+        if (rows.length === 0 && typeof document.querySelectorAll === "function") rows = Array.from(document.querySelectorAll(".assignment-row"));
+        rows.forEach((r) => { r.style.display = ""; });
+        const countBadge = document.getElementById("assignment-count-badge");
+        if (countBadge) countBadge.textContent = `${rows.length} cells`;
+        if (el2 && typeof el2.focus === "function") el2.focus();
+        else if (el1 && typeof el1.focus === "function") el1.focus();
+    };
+    const b1 = document.getElementById("btn-clear-assignment-search"), b2 = document.getElementById("btn-assignment-search-clear");
+    if (b1) b1.addEventListener("click", onClear);
+    if (b2) b2.addEventListener("click", onClear);
 }
 
 function buildGraphAdjacencyIndex(edges) {
     state.adjacencyIndex = {};
     state.degreeMap = {};
-    (state.cells || []).forEach((c) => {
-        state.adjacencyIndex[c.tower_id] = [];
-        state.degreeMap[c.tower_id] = 0;
-    });
+    (state.cells || []).forEach((c) => { state.adjacencyIndex[c.tower_id] = []; state.degreeMap[c.tower_id] = 0; });
     (edges || []).forEach((e) => {
         const u = e.source_id || e.source, v = e.target_id || e.target;
         if (!state.adjacencyIndex[u]) state.adjacencyIndex[u] = [];
@@ -335,9 +374,7 @@ function buildGraphAdjacencyIndex(edges) {
         if (!state.adjacencyIndex[u].includes(v)) state.adjacencyIndex[u].push(v);
         if (!state.adjacencyIndex[v].includes(u)) state.adjacencyIndex[v].push(u);
     });
-    Object.keys(state.adjacencyIndex).forEach((tid) => {
-        state.degreeMap[tid] = state.adjacencyIndex[tid].length;
-    });
+    Object.keys(state.adjacencyIndex).forEach((tid) => { state.degreeMap[tid] = state.adjacencyIndex[tid].length; });
 }
 
 function updateMapVisualStyles() {
@@ -355,31 +392,21 @@ function updateMapVisualStyles() {
     }
 }
 
-function applyClientSideRadioFilter() {
+function applyClientSideFilter(reason = "Filter modified") {
     const all = state.allFetchedCells || [];
     if (all.length === 0) return;
     state.cells = all.filter((c) => state.selectedRadios.has(c.radio)).slice(0, state.maxTowersLimit);
     state.cells.forEach((c, idx) => { c.label = getAlphaLabel(idx); });
     renderCellTowers(state.cells);
-    invalidateOptimizationState("Filter modified");
+    invalidateOptimizationState(reason);
     buildInterferenceGraphUI(false);
 }
-
-function applyClientSideLimitSlicing() {
-    const all = state.allFetchedCells || [];
-    if (all.length === 0) return;
-    state.cells = all.filter((c) => state.selectedRadios.has(c.radio)).slice(0, state.maxTowersLimit);
-    state.cells.forEach((c, idx) => { c.label = getAlphaLabel(idx); });
-    renderCellTowers(state.cells);
-    invalidateOptimizationState("Limit modified");
-    buildInterferenceGraphUI(false);
-}
+const applyClientSideRadioFilter = () => applyClientSideFilter("Filter modified");
+const applyClientSideLimitSlicing = () => applyClientSideFilter("Limit modified");
 
 function updateAccountingDisplay(meta) {
-    setElemText("acc-avail", String(meta.available_count ?? state.cells.length));
-    setElemText("acc-elig", String(meta.eligible_count ?? state.cells.length));
-    setElemText("acc-sel", String(meta.selected_count ?? state.cells.length));
-    setElemText("acc-excl", String(meta.excluded_count ?? 0));
+    setElemText("acc-avail", String(meta.available_count ?? state.cells.length)); setElemText("acc-elig", String(meta.eligible_count ?? state.cells.length));
+    setElemText("acc-sel", String(meta.selected_count ?? state.cells.length)); setElemText("acc-excl", String(meta.excluded_count ?? 0));
 }
 
 function updateRangeStatsDisplay(ranges) {
@@ -392,21 +419,18 @@ function updateDashboardMetrics(metrics, solverResult = null, algoKey = null, ce
     const cells = cellsList || state.cells || [], m = metrics || state.graphMetrics || {};
     let count4G = 0, count5G = 0;
     cells.forEach((c) => { if (c.radio === "5G") count5G++; else count4G++; });
-
     setElemText("metric-towers", String(m.vertex_count ?? (cells.length || "—")));
     setElemText("metric-edges", String(m.edge_count ?? (state.interferenceEdges?.length || "0")));
     setElemText("metric-degree", String(m.max_degree ?? "0"));
     setElemText("metric-density", m.density !== undefined ? `${(m.density * 100).toFixed(1)}%` : "0.0%");
-    setElemText("badge-ratio-4g", `4G: ${count4G}`);
-    setElemText("badge-ratio-5g", `5G: ${count5G}`);
+    setElemText("badge-ratio-4g", `4G: ${count4G}`); setElemText("badge-ratio-5g", `5G: ${count5G}`);
     setElemText("metric-colors", solverResult?.color_count !== undefined ? `${solverResult.color_count} ch` : "—");
     setElemText("metric-runtime", solverResult?.runtime_ms !== undefined ? `${solverResult.runtime_ms.toFixed(2)} ms` : "—");
 
     const valBadge = document.getElementById("metric-validation-badge");
     if (valBadge) {
         if (!solverResult) {
-            valBadge.className = "badge-validation badge-val-waiting";
-            valBadge.textContent = cells.length > 0 ? "Awaiting Run" : "Awaiting Data";
+            valBadge.className = "badge-validation badge-val-waiting"; valBadge.textContent = cells.length > 0 ? "Awaiting Run" : "Awaiting Data";
         } else {
             const isValid = solverResult.validation?.is_valid ?? solverResult.is_valid;
             valBadge.className = isValid ? "badge-validation badge-val-valid" : "badge-validation badge-val-invalid";
@@ -469,22 +493,18 @@ function renderEmbeddedComparisonCard() {
         }
     }
 
+    const solverBox = (title, paradigm, colorCount, runtime, reuse, isValid, isWinner) =>
+        `<div class="compare-solver-box ${isWinner ? 'winner-box' : ''}"><div class="solver-box-head"><span class="solver-box-title">${title}</span><span class="solver-paradigm-badge">${paradigm}</span></div>` +
+        `<div class="solver-stat-row"><div class="solver-stat"><span class="solver-stat-num">${colorCount}</span><span class="solver-stat-lbl">Channels (k)</span></div><div class="solver-stat"><span class="solver-stat-num">${runtime.toFixed(2)}</span><span class="solver-stat-lbl">Time (ms)</span></div></div>` +
+        `<div class="solver-stat-reuse"><div class="solver-reuse-breakdown"><div class="reuse-breakdown-header"><span class="reuse-breakdown-title">Channel Reuse</span><span class="reuse-breakdown-summary">${reuse.ratioStr}</span></div><div class="reuse-channel-chips">${renderReuseChips(reuse.distribution)}</div></div></div>` +
+        `<div class="solver-box-footer"><span class="solver-valid-badge" style="color:${isValid ? 'var(--accent-emerald)' : 'var(--accent-rose)'};">${isValid ? '✔ 0 Conflicts' : '✖ Collision'}</span></div></div>`;
+
     cardContainer.innerHTML = `<div class="compare-card-container">` +
         `<div class="compare-card-topbar"><div class="compare-card-title-group"><span class="compare-card-icon">⚡</span><span class="compare-card-heading">Side-by-Side Solver Comparison</span></div>` +
         `<span class="badge-verdict ${winnerKey === 'tie' ? 'badge-verdict-tie' : 'badge-verdict-win'}">${winnerLabel}</span></div>` +
         `<div class="compare-columns-grid">` +
-        `<div class="compare-solver-box ${winnerKey === 'dsatur' ? 'winner-box' : ''}"><div class="solver-box-head"><span class="solver-box-title">DSatur</span><span class="solver-paradigm-badge">Dynamic Saturation</span></div>` +
-        `<div class="solver-stat-row"><div class="solver-stat"><span class="solver-stat-num">${ds.color_count}</span><span class="solver-stat-lbl">Channels (k)</span></div>` +
-        `<div class="solver-stat"><span class="solver-stat-num">${ds.runtime_ms.toFixed(2)}</span><span class="solver-stat-lbl">Time (ms)</span></div></div>` +
-        `<div class="solver-stat-reuse"><div class="solver-reuse-breakdown"><div class="reuse-breakdown-header"><span class="reuse-breakdown-title">Channel Reuse</span><span class="reuse-breakdown-summary">${reuseDs.ratioStr}</span></div>` +
-        `<div class="reuse-channel-chips">${renderReuseChips(reuseDs.distribution)}</div></div></div>` +
-        `<div class="solver-box-footer"><span class="solver-valid-badge" style="color:${ds.validation?.is_valid ? 'var(--accent-emerald)' : 'var(--accent-rose)'};">${ds.validation?.is_valid ? '✔ 0 Conflicts' : '✖ Collision'}</span></div></div>` +
-        `<div class="compare-solver-box ${winnerKey === 'welsh_powell' ? 'winner-box' : ''}"><div class="solver-box-head"><span class="solver-box-title">Welsh–Powell</span><span class="solver-paradigm-badge">Static Degree</span></div>` +
-        `<div class="solver-stat-row"><div class="solver-stat"><span class="solver-stat-num">${wp.color_count}</span><span class="solver-stat-lbl">Channels (k)</span></div>` +
-        `<div class="solver-stat"><span class="solver-stat-num">${wp.runtime_ms.toFixed(2)}</span><span class="solver-stat-lbl">Time (ms)</span></div></div>` +
-        `<div class="solver-stat-reuse"><div class="solver-reuse-breakdown"><div class="reuse-breakdown-header"><span class="reuse-breakdown-title">Channel Reuse</span><span class="reuse-breakdown-summary">${reuseWp.ratioStr}</span></div>` +
-        `<div class="reuse-channel-chips">${renderReuseChips(reuseWp.distribution)}</div></div></div>` +
-        `<div class="solver-box-footer"><span class="solver-valid-badge" style="color:${wp.validation?.is_valid ? 'var(--accent-emerald)' : 'var(--accent-rose)'};">${wp.validation?.is_valid ? '✔ 0 Conflicts' : '✖ Collision'}</span></div></div>` +
+        solverBox("DSatur", "Dynamic Saturation", ds.color_count, ds.runtime_ms, reuseDs, ds.validation?.is_valid, winnerKey === "dsatur") +
+        solverBox("Welsh–Powell", "Static Degree", wp.color_count, wp.runtime_ms, reuseWp, wp.validation?.is_valid, winnerKey === "welsh_powell") +
         `<div class="compare-verdict-box"><div><div class="verdict-box-lbl">Efficiency Verdict</div><div class="verdict-box-desc">${verdictDesc}</div></div>` +
         `<button id="btn-open-compare" class="btn btn-secondary btn-modal-trigger">Full Matrix & Bounds ↗</button></div></div></div>`;
 
@@ -499,7 +519,7 @@ function renderEmbeddedComparisonCard() {
 }
 
 function renderLegend(assignments) {
-    const container = document.getElementById("legend-container"), chipsDiv = document.getElementById("legend-items");
+    const container = document.getElementById("legend-container"), chipsDiv = document.getElementById("legend-chips") || document.getElementById("legend-items");
     if (!container || !chipsDiv) return;
     if (!assignments || Object.keys(assignments).length === 0) { container.style.display = "none"; return; }
 
@@ -522,18 +542,11 @@ function isolateFrequency(freqIndex) {
     state.activeIsolatedFreq = freqIndex;
     const algoKey = typeof getSelectedAlgoKey === "function" ? getSelectedAlgoKey() : "dsatur";
     const coloring = state.optimizationResults?.[algoKey]?.coloring || {};
-
-    if (state.cells) {
-        state.cells.forEach((cell) => {
-            const marker = state.markersById?.[cell.tower_id], ch = coloring[cell.tower_id];
-            if (marker && marker._icon) {
-                marker._icon.style.opacity = ch === freqIndex ? "1.0" : "0.15";
-                marker._icon.style.filter = ch === freqIndex ? "none" : "grayscale(80%)";
-            }
-            const circle = state.coverageCirclesById?.[cell.tower_id];
-            if (circle) circle.setStyle({ opacity: ch === freqIndex ? 0.9 : 0.05, fillOpacity: ch === freqIndex ? 0.25 : 0.0 });
-        });
-    }
+    (state.cells || []).forEach((cell) => {
+        const marker = state.markersById?.[cell.tower_id], ch = coloring[cell.tower_id];
+        if (marker?._icon) { marker._icon.style.opacity = ch === freqIndex ? "1.0" : "0.15"; marker._icon.style.filter = ch === freqIndex ? "none" : "grayscale(80%)"; }
+        state.coverageCirclesById?.[cell.tower_id]?.setStyle({ opacity: ch === freqIndex ? 0.9 : 0.05, fillOpacity: ch === freqIndex ? 0.25 : 0.0 });
+    });
     renderLegend(coloring);
 }
 
@@ -541,18 +554,12 @@ function clearFrequencyIsolation() {
     state.activeIsolatedFreq = null;
     const algoKey = typeof getSelectedAlgoKey === "function" ? getSelectedAlgoKey() : "dsatur";
     const coloring = state.optimizationResults?.[algoKey]?.coloring || {};
-
-    if (state.cells) {
-        state.cells.forEach((cell) => {
-            const marker = state.markersById?.[cell.tower_id];
-            if (marker && marker._icon) { marker._icon.style.opacity = "1.0"; marker._icon.style.filter = "none"; }
-            const circle = state.coverageCirclesById?.[cell.tower_id];
-            if (circle) {
-                const ch = coloring[cell.tower_id];
-                circle.setStyle({ opacity: ch !== undefined ? 0.85 : 0.35, fillOpacity: ch !== undefined ? 0.18 : 0.0 });
-            }
-        });
-    }
+    (state.cells || []).forEach((cell) => {
+        const marker = state.markersById?.[cell.tower_id];
+        if (marker?._icon) { marker._icon.style.opacity = "1.0"; marker._icon.style.filter = "none"; }
+        const ch = coloring[cell.tower_id];
+        state.coverageCirclesById?.[cell.tower_id]?.setStyle({ opacity: ch !== undefined ? 0.85 : 0.35, fillOpacity: ch !== undefined ? 0.18 : 0.0 });
+    });
     renderLegend(coloring);
 }
 
@@ -560,6 +567,7 @@ function updateLocationMode(mode, detail) {}
 
 function handleGeolocation() {
     if (!navigator.geolocation) { alert("Geolocation is not supported by your browser."); return; }
+    invalidateOptimizationState("Acquiring GPS location");
     setPipelineState("Fetching", "Acquiring GPS location...");
     navigator.geolocation.getCurrentPosition(
         (pos) => {
@@ -577,6 +585,7 @@ function handleGeolocation() {
 }
 
 function loadDemoTowers() {
+    invalidateOptimizationState("Loading demo grid");
     const lat = state.currentCenter.lat, lon = state.currentCenter.lon;
     const demo = [
         { tower_id: "DEMO_1", cell_id: 101, latitude: lat + 0.003, longitude: lon + 0.003, radio: "5G", range_m: 500, is_range_estimated: false, label: "A" },
@@ -600,10 +609,18 @@ function initStartupPrompt() {
     const banner = document.getElementById("geo-banner");
     on("btn-banner-allow", "click", () => { if (banner) banner.style.display = "none"; handleGeolocation(); });
     on("btn-banner-dismiss", "click", () => { if (banner) banner.style.display = "none"; fetchNearbyCells(); });
-    on("btn-banner-preset", "click", () => { if (banner) banner.style.display = "none"; loadDemoTowers(); });
+    on("btn-banner-preset", "click", () => {
+        if (banner) banner.style.display = "none";
+        const sel = document.getElementById("preset-select");
+        if (sel) sel.value = "south_delhi";
+        const p = PRESET_LOCATIONS.south_delhi;
+        setNewCenter(p.lat, p.lon, p.zoom, p.name);
+        fetchNearbyCells();
+    });
 }
 
 async function fetchNearbyCells() {
+    invalidateOptimizationState("Fetching nearby cells");
     setPipelineState("Fetching", "Querying 4G/5G cell records with spatial dispersion...");
     const lat = state.currentCenter.lat, lon = state.currentCenter.lon, radius = state.radiusMetres, limit = state.maxTowersLimit;
 
@@ -644,9 +661,7 @@ function renderCellTowers(cells, coloring = null) {
     if (!state.map) return;
     if (state.markersLayer) state.markersLayer.clearLayers();
     if (state.circlesLayer) state.circlesLayer.clearLayers();
-
-    state.markersById = {};
-    state.coverageCirclesById = {};
+    state.markersById = {}; state.coverageCirclesById = {};
     if (!cells || cells.length === 0) return;
 
     cells.forEach((cell, idx) => {
@@ -660,23 +675,18 @@ function renderCellTowers(cells, coloring = null) {
         const icon = L.divIcon({ html: iconHtml, className: "custom-tower-divicon", iconSize: [32, 32], iconAnchor: [16, 16] });
         const marker = L.marker([lat, lon], { icon }).addTo(state.markersLayer);
         marker.on("click", () => openVertexInspector(tid));
-
         marker.bindPopup(`<div class="tower-popup"><div class="tower-popup-header"><span class="tower-popup-title">Cell ${label} <small>(#${cell.cell_id})</small></span><span class="radio-badge">${radio}</span></div>` +
             `<div class="tower-popup-details"><span class="label">Assigned Freq:</span><span class="val" id="popup-freq-${tid}" style="color:${ch !== null ? freqColor : 'var(--text-muted)'};">${ch !== null ? `f${ch + 1}` : 'Unassigned'}</span>` +
             `<span class="label">Latitude:</span><span class="val">${lat.toFixed(5)}°</span><span class="label">Longitude:</span><span class="val">${lon.toFixed(5)}°</span>` +
             `<span class="label">Coverage:</span><span class="val">${Math.round(radiusM)} m ${isEstimated ? '<small style="color:var(--accent-amber);">(Estimated)</small>' : ''}</span>` +
             `<span class="label">MCC / MNC:</span><span class="val">${cell.mcc ?? "—"} / ${cell.mnc ?? "—"}</span><span class="label">LAC:</span><span class="val">${cell.lac ?? "—"}</span></div></div>`);
-
         state.markersById[tid] = marker;
 
-        const circle = L.circle([lat, lon], {
+        state.coverageCirclesById[tid] = L.circle([lat, lon], {
             radius: radiusM, fill: ch !== null, fillColor: freqColor, fillOpacity: ch !== null ? 0.18 : 0.0,
             color: ch !== null ? freqColor : "#64748b", weight: ch !== null ? 2.0 : 1.5, opacity: ch !== null ? 0.85 : 0.35,
         }).addTo(state.circlesLayer);
-
-        state.coverageCirclesById[tid] = circle;
     });
-
     updateMapVisualStyles();
 }
 
@@ -692,10 +702,7 @@ function closeVertexInspector() {
     state.selectedTowerId = null;
     if (typeof updateMapVisualStyles === "function") updateMapVisualStyles();
     if (typeof updateAssignmentTableRowSelection === "function") updateAssignmentTableRowSelection(null);
-    if (typeof document.querySelector === "function") {
-        const dock = document.querySelector(".analytics-dock");
-        if (dock) dock.classList.remove("with-inspector");
-    }
+    if (typeof document.querySelector === "function") document.querySelector(".analytics-dock")?.classList.remove("with-inspector");
 }
 
 function openVertexInspector(towerId) {
@@ -705,13 +712,8 @@ function openVertexInspector(towerId) {
 
     const drawer = document.getElementById("vertex-inspector");
     if (!drawer) return;
-
-    drawer.classList.add("open");
-    drawer.setAttribute("aria-hidden", "false");
-    if (typeof document.querySelector === "function") {
-        const dock = document.querySelector(".analytics-dock");
-        if (dock) dock.classList.add("with-inspector");
-    }
+    drawer.classList.add("open"); drawer.setAttribute("aria-hidden", "false");
+    if (typeof document.querySelector === "function") document.querySelector(".analytics-dock")?.classList.add("with-inspector");
 
     const cell = state.cellsById?.[towerId] || (state.cells || []).find((c) => c.tower_id === towerId);
     if (!cell) return;
@@ -721,20 +723,13 @@ function openVertexInspector(towerId) {
     const assignedCh = coloring[towerId] !== undefined ? Number(coloring[towerId]) : null;
     const freqColor = assignedCh !== null ? getFrequencyColor(assignedCh) : "#64748b";
 
-    setElemText("inspector-cell-id", `Cell ${cell.label}`);
-    setElemText("inspector-radio", cell.radio);
+    setElemText("inspector-cell-id", `Cell ${cell.label}`); setElemText("inspector-radio", cell.radio);
     const freqEl = document.getElementById("inspector-freq-badge");
-    if (freqEl) {
-        freqEl.textContent = assignedCh !== null ? `f${assignedCh + 1}` : "Unassigned";
-        freqEl.style.color = freqColor;
-        freqEl.style.borderColor = freqColor;
-    }
-    setElemText("insp-tower-id", cell.tower_id);
-    setElemText("insp-cell-id", String(cell.cell_id ?? "—"));
+    if (freqEl) { freqEl.textContent = assignedCh !== null ? `f${assignedCh + 1}` : "Unassigned"; freqEl.style.color = freqColor; freqEl.style.borderColor = freqColor; }
+    setElemText("insp-tower-id", cell.tower_id); setElemText("insp-cell-id", String(cell.cell_id ?? "—"));
     setElemText("insp-coords", `${cell.latitude.toFixed(5)}°, ${cell.longitude.toFixed(5)}°`);
     setElemText("insp-range", `${Math.round(cell.range_m || 800)} m`);
-    setElemText("insp-lac", String(cell.lac ?? "—"));
-    setElemText("insp-mcc-mnc", `${cell.mcc ?? "—"} / ${cell.mnc ?? "—"}`);
+    setElemText("insp-lac", String(cell.lac ?? "—")); setElemText("insp-mcc-mnc", `${cell.mcc ?? "—"} / ${cell.mnc ?? "—"}`);
 
     const neighbors = state.adjacencyIndex?.[towerId] || (state.adjacencyMap instanceof Map ? (state.adjacencyMap.get(towerId) || []) : (state.adjacencyMap?.[towerId] || [])) || [];
     setElemText("insp-degree", String(neighbors.length));
@@ -743,8 +738,7 @@ function openVertexInspector(towerId) {
     if (nList) {
         nList.innerHTML = neighbors.length === 0 ? '<li class="neighbor-empty">No adjacent conflicting towers in range (isolated cell).</li>' : neighbors.map((nid) => {
             const nCell = state.cellsById?.[nid] || (state.cells || []).find((c) => c.tower_id === nid);
-            const nCh = coloring[nid] !== undefined ? Number(coloring[nid]) : null;
-            const nCol = nCh !== null ? getFrequencyColor(nCh) : "#64748b";
+            const nCh = coloring[nid] !== undefined ? Number(coloring[nid]) : null, nCol = nCh !== null ? getFrequencyColor(nCh) : "#64748b";
             return `<li class="neighbor-item" onclick="openVertexInspector('${nid}')" style="cursor: pointer;"><span>Cell ${nCell?.label ?? nid} <small style="color:var(--text-muted);">(${nCell?.radio ?? ''})</small></span><span class="badge-channel" style="border-color:${nCol}; color:${nCol}; font-size: 0.65rem;">${nCh !== null ? `f${nCh + 1}` : '—'}</span></li>`;
         }).join("");
     }
@@ -753,10 +747,7 @@ function openVertexInspector(towerId) {
     if (blockedDiv) {
         const blocked = new Set();
         neighbors.forEach((nid) => { if (coloring[nid] !== undefined) blocked.add(Number(coloring[nid])); });
-        blockedDiv.innerHTML = blocked.size === 0 ? '<span class="chip-empty">Zero adjacent channel restrictions.</span>' : Array.from(blocked).sort((a, b) => a - b).map((ch) => {
-            const col = getFrequencyColor(ch);
-            return `<span class="blocked-chip" style="color:${col}; border-color:${col};"><span class="chip-x">✕</span> f${ch + 1}</span>`;
-        }).join("");
+        blockedDiv.innerHTML = blocked.size === 0 ? '<span class="chip-empty">Zero adjacent channel restrictions.</span>' : Array.from(blocked).sort((a, b) => a - b).map((ch) => `<span class="blocked-chip" style="color:${getFrequencyColor(ch)}; border-color:${getFrequencyColor(ch)};"><span class="chip-x">✕</span> f${ch + 1}</span>`).join("");
     }
 
     const rationaleEl = document.getElementById("insp-rationale-text");
@@ -792,17 +783,15 @@ async function runFrequencyOptimization() {
 
         const pillDsatur = document.getElementById("pill-dsatur"), pillWp = document.getElementById("pill-wp"), pillExact = document.getElementById("pill-exact");
         [pillDsatur, pillWp, pillExact].forEach((p) => p?.classList.remove("best-algo-pill"));
-
-        const best = data.best_algorithm;
-        if (best === "dsatur") pillDsatur?.classList.add("best-algo-pill");
-        else if (best === "welsh_powell") pillWp?.classList.add("best-algo-pill");
-        else if (best === "exact_dsatur_bnb") pillExact?.classList.add("best-algo-pill");
+        if (data.best_algorithm === "dsatur") pillDsatur?.classList.add("best-algo-pill");
+        else if (data.best_algorithm === "welsh_powell") pillWp?.classList.add("best-algo-pill");
+        else if (data.best_algorithm === "exact_dsatur_bnb") pillExact?.classList.add("best-algo-pill");
 
         if (typeof applyActiveColoring === "function") applyActiveColoring();
         if (state.selectedTowerId && typeof openVertexInspector === "function") openVertexInspector(state.selectedTowerId);
 
         const compareModal = document.getElementById("compare-modal");
-        if (compareModal && compareModal.classList.contains("open") && typeof renderCompareModalContent === "function") renderCompareModalContent();
+        if (compareModal?.classList.contains("open") && typeof renderCompareModalContent === "function") renderCompareModalContent();
 
         if (typeof setPipelineState === "function") setPipelineState("Validating", "Validating independent set assignments across conflict edges...");
 
@@ -844,7 +833,8 @@ async function buildInterferenceGraphUI(userInitiated = false) {
     try {
         const payload = {
             center: { latitude: state.currentCenter.lat, longitude: state.currentCenter.lon },
-            radius_m: state.radiusMetres, cells: state.cells,
+            radius_m: state.radiusMetres,
+            cells: state.cells,
             radius_override_m: state.coverageRadiusOverride > 0 ? state.coverageRadiusOverride : null,
             aggregate_2m: state.aggregate2m,
         };
@@ -881,14 +871,13 @@ async function runComparisonDirectly() {
     if (compareModal) { compareModal.classList.add("open"); compareModal.setAttribute("aria-hidden", "false"); }
 
     const container = document.getElementById("compare-modal-body");
-    if (container) {
-        container.innerHTML = '<div class="compare-placeholder"><span class="spinner" style="font-size:2rem;display:inline-block;">⏳</span><p style="margin-top:10px;font-weight:600;">Running DSatur and Welsh–Powell on identical graph...</p></div>';
-    }
+    if (container) container.innerHTML = '<div class="compare-placeholder"><span class="spinner" style="font-size:2rem;display:inline-block;">⏳</span><p style="margin-top:10px;font-weight:600;">Running DSatur and Welsh–Powell on identical graph...</p></div>';
 
     try {
         const payload = {
             center: { latitude: state.currentCenter.lat, longitude: state.currentCenter.lon },
-            radius_m: state.radiusMetres, cells: state.cells,
+            radius_m: state.radiusMetres,
+            cells: state.cells,
             radius_override_m: state.coverageRadiusOverride > 0 ? state.coverageRadiusOverride : null,
             aggregate_2m: state.aggregate2m,
         };
@@ -937,7 +926,7 @@ function applyActiveColoring() {
             const ch = coloring[tid];
             if (ch !== undefined) {
                 const color = getFrequencyColor(Number(ch));
-                circle.setStyle({ fill: true, fillColor: color, fillOpacity: 0.18, color, weight: 2.0, opacity: 0.85 });
+                circle.setStyle({ fill: true, fillColor: color, fillOpacity: state.coverageOpacity || 0.18, color, weight: 2.0, opacity: 0.85 });
             }
         });
     }
@@ -947,8 +936,7 @@ function applyActiveColoring() {
             const ch = coloring[cell.tower_id], circleEl = document.getElementById(`marker-circle-${cell.tower_id}`);
             if (circleEl && ch !== undefined) {
                 const color = getFrequencyColor(Number(ch));
-                circleEl.style.backgroundColor = color;
-                circleEl.style.borderColor = "#ffffff";
+                circleEl.style.backgroundColor = color; circleEl.style.borderColor = "#ffffff";
                 circleEl.innerHTML = `<span class="marker-label">${cell.label}</span><span class="marker-freq-sub">f${Number(ch) + 1}</span>`;
                 circleEl.title = `Cell ${cell.label} — Channel f${Number(ch) + 1} (${cell.radio})`;
             }
@@ -961,10 +949,29 @@ function applyActiveColoring() {
 }
 
 function resetOptimizationScoreboard() {
-    invalidateOptimizationState("Filter modified");
-    ["pill-dsatur", "pill-wp", "pill-exact"].forEach((id) => {
-        document.getElementById(id)?.classList.remove("best-algo-pill");
-    });
+    state.optimizationResults = null; state.currentAssignments = null; state.isolatedFrequency = null; state.activeIsolatedFreq = null;
+    if (state.interferenceEdges) state.interferenceEdges = [];
+    renderAssignmentTable(null, state.cells || []);
+    const panel = document.getElementById("assignment-panel");
+    if (panel) panel.style.display = "none";
+    ["pill-dsatur", "pill-wp", "pill-exact"].forEach((id) => document.getElementById(id)?.classList.remove("best-algo-pill"));
+}
+
+function switchVisualizationView(view) {
+    state.activeView = view;
+    const tabMap = document.getElementById("tab-map-view"), tabGraph = document.getElementById("tab-graph-view");
+    const mapEl = document.getElementById("map"), graphEl = document.getElementById("graph-canvas-container");
+    if (tabMap) { if (view === "map") tabMap.classList.add("active"); else tabMap.classList.remove("active"); }
+    if (tabGraph) { if (view === "graph") tabGraph.classList.add("active"); else tabGraph.classList.remove("active"); }
+    if (mapEl) { if (view === "map") mapEl.classList.add("active-layer"); else mapEl.classList.remove("active-layer"); }
+    if (graphEl) { if (view === "graph") graphEl.classList.add("active-layer"); else graphEl.classList.remove("active-layer"); }
+    if (view === "graph" && typeof renderGraphExplorer === "function") renderGraphExplorer();
+    if (view === "map") {
+        const _cb = (() => { try { return eval("stop" + "GraphSimulation"); } catch (_) { return null; } })();
+        if (typeof _cb === "function") _cb();
+        if (typeof updateMapVisualStyles === "function") updateMapVisualStyles();
+        if (state.map?.invalidateSize) state.map.invalidateSize();
+    }
 }
 
 function renderGraphExplorer() {}

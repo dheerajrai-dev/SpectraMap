@@ -199,16 +199,17 @@ def test_section_5_pipeline_actions():
 
 def test_visualization_switcher_and_containers():
     """
-    Main Visualizer Workspace
-    Map is the single primary visualizer; graph canvas and tabs are excised.
+    Main Visualizer
+    Map is the primary visualization; separate graph topology canvas is excised per Prompt 6.
     """
     dom, _ = parse_index_html()
 
     assert "map" in dom.elements_by_id
-    assert "tab-map-view" not in dom.elements_by_id
-    assert "tab-graph-view" not in dom.elements_by_id
     assert "graph-canvas" not in dom.elements_by_id
     assert "graph-canvas-container" not in dom.elements_by_id
+    assert "tab-map-view" not in dom.elements_by_id
+    assert "tab-graph-view" not in dom.elements_by_id
+
 
 def test_analytics_dashboard_8_kpis_and_comparison():
     """

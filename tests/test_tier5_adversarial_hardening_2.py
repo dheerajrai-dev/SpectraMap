@@ -663,7 +663,7 @@ class TestFrontendIntegrationContracts:
         assert html_path.exists(), "static/index.html must exist"
         html_content = html_path.read_text(encoding="utf-8")
 
-        # Active UI element IDs queried and bound by static/app.js
+        # Active UI element IDs queried and bound by static/app.js (Prompt 6 excised canvas and decorative badges)
         critical_element_ids = [
             "map",
             "status-badge",

@@ -207,15 +207,18 @@ def get_graph_metrics(graph: nx.Graph) -> dict[str, Any]:
     max_deg = max((deg for _, deg in graph.degree()), default=0)
     avg_deg = round(sum(deg for _, deg in graph.degree()) / node_count, 2) if node_count > 0 else 0.0
 
-    # Lower bound via maximum clique approximation: omega(G) <= chi(G)
+    # Lower bound via maximum clique: omega(G) <= chi(G)
     clique_lb = 0
     if node_count > 0:
         if edge_count == 0:
             clique_lb = 1
         else:
             try:
-                approx_clique = nx.approximation.max_clique(graph)
-                clique_lb = len(approx_clique)
+                if node_count <= 100:
+                    _, clique_lb = nx.algorithms.clique.max_weight_clique(graph, weight=None)
+                else:
+                    approx_clique = nx.approximation.max_clique(graph)
+                    clique_lb = len(approx_clique)
             except Exception:
                 clique_lb = 1
 

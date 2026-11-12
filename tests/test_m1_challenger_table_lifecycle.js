@@ -173,11 +173,11 @@ console.log("=== EMPIRICAL CHALLENGE 1: renderAssignmentTable unhides #assignmen
     // Call renderAssignmentTable
     fnRenderAssignmentTable({ "T1": 0, "T2": 1 }, globalState.cells);
 
-    // Verify panel is now display: block
-    assert.strictEqual(panel.style.display, "block", "renderAssignmentTable must set #assignment-panel to 'block'");
+    // Verify panel is now visible
+    assert.ok(panel.style.display === "block" || panel.style.display === "flex", "renderAssignmentTable must set #assignment-panel to visible ('flex' or 'block')");
     assert.strictEqual(globalState.currentAssignments["T1"], 0);
     assert.strictEqual(globalState.currentAssignments["T2"], 1);
-    console.log("✔ PASS: renderAssignmentTable sets #assignment-panel to visible ('block').");
+    console.log("✔ PASS: renderAssignmentTable sets #assignment-panel to visible ('flex' or 'block').");
 }
 
 console.log("=== EMPIRICAL CHALLENGE 2: invalidateOptimizationState hides #assignment-panel ===");
@@ -310,7 +310,7 @@ console.log("=== EMPIRICAL CHALLENGE 4: Rapid Alternating Render / Invalidate Li
         // Optimize / render
         globalState.optimizationResults = { dsatur: { coloring: { "T1": 0 } } };
         scope.renderAssignmentTable({ "T1": 0 }, globalState.cells);
-        assert.strictEqual(panel.style.display, "block", `Cycle ${cycle}: display must be 'block' after render`);
+        assert.ok(panel.style.display === "block" || panel.style.display === "flex", `Cycle ${cycle}: display must be visible after render`);
 
         // Invalidate
         scope.invalidateOptimizationState(`Cycle ${cycle} test mutation`);

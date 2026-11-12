@@ -462,7 +462,7 @@ def test_frontend_dom_elements_exist_in_html():
         "acc-elig",
         "acc-sel",
         "acc-excl",
-
+        "map",
     ]
 
     for cid in critical_m3_ids:
