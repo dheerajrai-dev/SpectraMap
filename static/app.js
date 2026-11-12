@@ -58,7 +58,7 @@ function initMap() {
     state.map = L.map("map", { zoomControl: false }).setView([state.currentCenter.lat, state.currentCenter.lon], 14);
     L.control.zoom({ position: "bottomright" }).addTo(state.map);
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        attribution: "&copy; OpenStreetMap contributors", maxZoom: 19, className: "dark-tiles",
+        attribution: "&copy; OpenStreetMap contributors", maxZoom: 19, className: "colorful-tiles",
     }).addTo(state.map);
     state.circlesLayer = L.layerGroup().addTo(state.map);
     state.markersLayer = L.layerGroup().addTo(state.map);

@@ -81,8 +81,8 @@ html, body {
     height: 100%; z-index: 1;
 }
 
-.dark-tiles, .dark-tiles .leaflet-tile, .dark-tiles img {
-    filter: brightness(0.6) invert(1) contrast(3) hue-rotate(200deg) saturate(0.3) brightness(0.7);
+.colorful-tiles, .leaflet-tile-pane img {
+    filter: saturate(1.22) contrast(1.06) brightness(1.02);
 }
 
 .map-overlay {
