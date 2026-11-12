@@ -57,8 +57,8 @@ function initMap() {
     if (!mapEl || state.map) return;
     state.map = L.map("map", { zoomControl: false }).setView([state.currentCenter.lat, state.currentCenter.lon], 14);
     L.control.zoom({ position: "bottomright" }).addTo(state.map);
-    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
-        attribution: "&copy; OpenStreetMap contributors &copy; CARTO", maxZoom: 19, subdomains: "abcd",
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "&copy; OpenStreetMap contributors", maxZoom: 19, className: "dark-tiles",
     }).addTo(state.map);
     state.circlesLayer = L.layerGroup().addTo(state.map);
     state.markersLayer = L.layerGroup().addTo(state.map);
