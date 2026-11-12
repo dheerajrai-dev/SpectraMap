@@ -199,24 +199,16 @@ def test_section_5_pipeline_actions():
 
 def test_visualization_switcher_and_containers():
     """
-    Main Visualizer Switcher
-    Must provide tabs for Leaflet Map and HTML5 Canvas views without state loss.
+    Main Visualizer
+    Map is the primary visualization; separate graph topology canvas is excised per Prompt 6.
     """
     dom, _ = parse_index_html()
 
-    assert "tab-map-view" in dom.elements_by_id
-    tab_map = dom.elements_by_id["tab-map-view"]
-    assert tab_map["attrs"].get("role") == "tab"
-    assert tab_map["attrs"].get("aria-selected") == "true"
-
-    assert "tab-graph-view" in dom.elements_by_id
-    tab_graph = dom.elements_by_id["tab-graph-view"]
-    assert tab_graph["attrs"].get("role") == "tab"
-    assert tab_graph["attrs"].get("aria-selected") == "false"
-
     assert "map" in dom.elements_by_id
-    assert "graph-canvas" in dom.elements_by_id
-    assert "graph-canvas-container" in dom.elements_by_id
+    assert "graph-canvas" not in dom.elements_by_id
+    assert "graph-canvas-container" not in dom.elements_by_id
+    assert "tab-map-view" not in dom.elements_by_id
+    assert "tab-graph-view" not in dom.elements_by_id
 
 
 def test_analytics_dashboard_8_kpis_and_comparison():

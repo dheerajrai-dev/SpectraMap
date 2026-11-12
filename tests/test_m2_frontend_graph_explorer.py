@@ -29,6 +29,7 @@ Verifies:
 import re
 import subprocess
 from pathlib import Path
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 APP_JS = REPO_ROOT / "static" / "app.js"
@@ -59,6 +60,7 @@ def test_app_js_syntax_validity():
     assert res.returncode == 0, f"node --check failed:\n{res.stderr}"
 
 
+@pytest.mark.skip(reason="Excised separate Graph Topology visualization per Prompt 6")
 def test_force_simulation_physics_implementation():
     """Verify presence of Coulomb repulsion, Hooke springs, gravity, damping, and stability threshold."""
     content = APP_JS.read_text(encoding="utf-8")
@@ -90,6 +92,7 @@ def test_force_simulation_physics_implementation():
     assert re.search(r"maxV\s*<\s*0\.0\d+", content)
 
 
+@pytest.mark.skip(reason="Excised separate Graph Topology visualization per Prompt 6")
 def test_node_radius_mapped_to_degree():
     """Verify that node radius dynamically maps to vertex degree Delta(v) in range 7px to 18px."""
     content = APP_JS.read_text(encoding="utf-8")
@@ -101,6 +104,7 @@ def test_node_radius_mapped_to_degree():
     assert "7 + (deg / maxDeg) * 11" in content or re.search(r"7\s*\+\s*\(\s*deg\s*/\s*maxDeg\s*\)\s*\*\s*11", content)
 
 
+@pytest.mark.skip(reason="Excised separate Graph Topology visualization per Prompt 6")
 def test_node_color_and_adaptive_edge_opacity():
     """Verify node coloring by frequency channel and adaptive edge opacity."""
     content = APP_JS.read_text(encoding="utf-8")
@@ -111,6 +115,7 @@ def test_node_color_and_adaptive_edge_opacity():
     assert "rgba(245, 158, 11" in content  # Amber incident glow
 
 
+@pytest.mark.skip(reason="Excised separate Graph Topology visualization per Prompt 6")
 def test_interactive_node_dragging():
     """Verify interactive mouse dragging and relaxation in initGraphCanvasInteractions."""
     content = APP_JS.read_text(encoding="utf-8")
@@ -124,6 +129,7 @@ def test_interactive_node_dragging():
     assert "graph-canvas-dragging" in content
 
 
+@pytest.mark.skip(reason="Excised separate Graph Topology visualization per Prompt 6")
 def test_view_switching_state_preservation_and_sync():
     """Verify seamless view switching calls updateMapVisualStyles and map.invalidateSize."""
     content = APP_JS.read_text(encoding="utf-8")
@@ -176,6 +182,7 @@ def test_no_unguarded_get_element_by_id_property_access():
     assert len(unguarded) == 0, f"Found unguarded document.getElementById accesses: {unguarded}"
 
 
+@pytest.mark.skip(reason="Excised separate Graph Topology visualization per Prompt 6")
 def test_css_styles_for_dragging_and_reuse():
     """Verify style.css contains classes for grabbing cursor and solver reuse breakdown."""
     css = STYLE_CSS.read_text(encoding="utf-8")

@@ -687,13 +687,15 @@ class TestFeature13InteractiveForceDirectedCanvasExplorer:
         resp = client.get("/")
         assert resp.status_code == 200
         html = resp.text
-        assert 'id="graph-canvas"' in html
-        assert 'id="graph-canvas-container"' in html
+        # Prompt 6: Excised separate Graph Topology visualization from UI
+        assert 'id="graph-canvas"' not in html
+        assert 'id="graph-canvas-container"' not in html
 
     def test_f13_physics_simulation_controls_present(self, client):
         resp = client.get("/")
         assert resp.status_code == 200
-        assert 'id="tab-graph-view"' in resp.text
+        # Prompt 6: Excised separate Graph Topology visualization from UI
+        assert 'id="tab-graph-view"' not in resp.text
 
 
 # ============================================================================
@@ -712,8 +714,9 @@ class TestFeature14GeographicMapViewAndSeamlessSwitching:
 
     def test_f14_view_tabs_present_in_html(self, client):
         resp = client.get("/")
-        assert 'id="tab-map-view"' in resp.text
-        assert 'id="tab-graph-view"' in resp.text
+        # Prompt 6: Map is the primary workspace; separate view switcher tabs excised
+        assert 'id="tab-map-view"' not in resp.text
+        assert 'id="tab-graph-view"' not in resp.text
 
     def test_f14_nodes_contain_latitude_longitude_for_map(self, client):
         cells = [_make_cell("T1", 28.5224, 77.1906)]

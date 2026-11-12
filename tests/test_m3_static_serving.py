@@ -37,7 +37,7 @@ def test_root_endpoint_serves_index_html(client):
     assert "<title>SpectraMap" in response.text
     assert 'id="control-dock"' in response.text or 'id="section-location"' in response.text
     assert 'id="map"' in response.text
-    assert 'id="graph-canvas"' in response.text
+    assert 'id="graph-canvas"' not in response.text
 
 
 def test_static_index_html_endpoint(client):
@@ -462,10 +462,7 @@ def test_frontend_dom_elements_exist_in_html():
         "acc-elig",
         "acc-sel",
         "acc-excl",
-        "tab-map-view",
-        "tab-graph-view",
         "map",
-        "graph-canvas",
     ]
 
     for cid in critical_m3_ids:
