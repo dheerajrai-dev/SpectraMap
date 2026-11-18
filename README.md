@@ -1,4 +1,4 @@
-# SpectraMap v2.0
+# SpectraMap
 
 **Production-Grade Geospatial Graph Coloring & Cellular Frequency Allocation Platform**
 
@@ -44,7 +44,7 @@ SpectraMap transforms this geospatial coordination problem into an exact graph-t
 - **Backend Framework:** FastAPI 0.143+ (Python 3.11 / 3.12 / 3.14 compatible)
 - **ASGI Production Server:** Uvicorn (standard with uvloop and httptools)
 - **Graph Algorithms & Modeling:** NetworkX 3.7
-- **Schema Validation & Parsing:** Pydantic v2
+- **Schema Validation & Parsing:** Pydantic
 - **HTTP Client:** HTTPX 0.28+ (asynchronous OpenCellID ingestion)
 - **Environment Management:** python-dotenv
 - **Frontend Architecture:** Vanilla JavaScript (ES6+), Leaflet 1.9.4, Modern CSS3 Glassmorphism
@@ -59,7 +59,7 @@ SpectraMap/
 ├── app.py                     # FastAPI application, CORS, security headers & REST routes
 ├── data_service.py            # OpenCellID ingestion, Haversine geodesic math, local cache
 ├── graph_engine.py            # NetworkX graph builder, DSatur, Welsh-Powell, Exact B&B, Validator
-├── schemas.py                 # Pydantic v2 request & response validation schemas
+├── schemas.py                 # Pydantic request & response validation schemas
 ├── requirements.txt           # Production dependencies with version bounds
 ├── .env.example               # Safe environment variable configuration template
 ├── .gitignore                 # Comprehensive repository exclusions
@@ -67,9 +67,7 @@ SpectraMap/
 ├── docker-compose.yml         # Container orchestration specification
 ├── pytest.ini                 # Pytest test discovery & runner configuration
 ├── README.md                  # System architecture, deployment & operational manual
-├── PROJECT.md                 # Project path specification & milestone requirements
-├── TEST_INFRA.md              # Test infrastructure documentation
-├── TEST_READY.md              # Test readiness verification
+├── LICENSE                    # MIT open-source license specification
 ├── data/                      # App-managed local JSON cache (gitignored)
 ├── docs/                      # Architectural specifications & PRDs
 │   ├── SpectraMap_Final_PRD.md
@@ -93,7 +91,7 @@ SpectraMap/
 
 - **Python:** Version 3.11, 3.12, or 3.14.
 - **Package Manager:** `pip` (Python package installer).
-- **Git:** Version 2.30+ installed.
+- **Git:** 2.30+ installed.
 - **Docker & Docker Compose (Optional):** For containerized deployment.
 - **OpenCellID API Key (Optional):** Required only for fetching live external cell towers. Offline Demo Grid runs with zero external credentials.
 
@@ -164,7 +162,7 @@ SpectraMap employs a local, file-based caching layer under the `data/` directory
 
 ### System Endpoints
 - `GET /` — Serves the frontend single-page application (`static/index.html`).
-- `GET /api/health` — Production healthcheck probe returning `{"status": "ok", "app": "SpectraMap", "version": "2.0"}`.
+- `GET /api/health` — Production healthcheck probe returning application operational status and readiness.
 - `GET /api/status` — Backward-compatible application readiness check.
 
 ### Transceiver Data Endpoints
@@ -185,13 +183,13 @@ Run the comprehensive automated test suite with `pytest`:
 
 ```bash
 # Run all unit, integration, and mathematical boundary tests
-pytest -v
+python -m pytest -v
 
 # Run frontend DOM and structural verification tests
-pytest tests/test_m3_frontend_structure.py -v
+python -m pytest tests/test_m3_frontend_structure.py -v
 
 # Run graph coloring algorithm & theoretical bounds tests
-pytest tests/test_graph_engine.py -v
+python -m pytest tests/test_graph_engine.py -v
 ```
 
 All unit and integration tests run completely offline and finish in under 3 seconds.
