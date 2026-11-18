@@ -1,138 +1,300 @@
 # SpectraMap v2.0
 
-**Spatial Graph Coloring for Cellular Frequency Optimization**
+**Production-Grade Geospatial Graph Coloring & Cellular Frequency Allocation Platform**
 
-SpectraMap is an educational, interactive web application that demonstrates how graph theory models simplified cellular frequency allocation. It ingests geographic cell-tower records, constructs a selective interference graph based on circular coverage overlap ($d(u,v) \le r_u + r_v$), and runs both **DSatur** and **Welsh–Powell** vertex-coloring heuristics to allocate non-conflicting frequency groups, accompanied by independent conflict validation.
-
----
-
-## 1. Problem Statement & Mathematical Formulation
-
-Wireless carriers purchase expensive radio spectrum at national auctions. Because spectrum is strictly finite, frequency channels must be reused geographically. However, if two nearby transmitters operate on the identical frequency channel and their coverage areas overlap, severe co-channel interference occurs.
-
-SpectraMap maps this spatial problem into an undirected conflict graph $G = (V, E)$:
-
-1. **Vertices ($V$):** Each localized base station transceiver ($v \in V$) with coordinates $(\phi_i, \lambda_i)$ and coverage radius $r_i$.
-2. **Edges ($E$):** An undirected interference edge $(u, v) \in E$ exists if and only if the spherical Haversine geodesic distance satisfies:
-   $$d(u, v) \le r_u + r_v$$
-   (closed disk overlap model).
-3. **Colors ($c(v)$):** Discrete frequency groups $f_1, f_2, \dots, f_k$. Valid coloring requires:
-   $$\forall (u, v) \in E, \quad c(u) \ne c(v)$$
-4. **Independent Validation:** Every edge is verified separately after optimization. Any edge with $c(u) == c(v)$ is reported as a collision.
-
-> **Educational Model Disclaimer:** SpectraMap is a discrete mathematical model designed for academic and demonstrative purposes. It does not replace carrier-grade RF planning, does not simulate 3-sector 120° directional antennas, SINR thresholds, or terrain shadow fading, and cannot guarantee the elimination of physical radio interference.
+SpectraMap is a high-performance, interactive geospatial web application that formulates cellular channel assignment as an undirected graph vertex coloring problem. It ingests real-world base station transceiver records from OpenCellID (or offline demo grids), builds an interference graph based on spatial circular coverage overlap ($d(u,v) \le r_u + r_v$), and executes **DSatur**, **Welsh–Powell**, and an **Exact Branch-and-Bound** solver to compute zero-collision frequency channel allocations.
 
 ---
 
-## 2. Solvers & Theoretical Bounds
+## 1. Application Overview
 
-SpectraMap implements and compares three complementary coloring algorithms on the identical graph:
+Radio frequency (RF) spectrum is a scarce, high-value public resource auctioned to telecommunications operators. Because available frequency channels are strictly finite, transmitters operating in the same geographic region must reuse channels without causing co-channel interference. If two nearby base stations transmit on the identical frequency channel and their electromagnetic coverage envelopes collide, severe interference occurs—resulting in dropped calls and signal degradation.
 
-- **DSatur (Brélaz, 1979):** Dynamically tracks the saturation degree $\text{sat}(v)$ (number of distinct colors assigned to neighbors). Selects uncolored vertices with highest saturation first, breaking ties by uncolored degree.
-- **Welsh–Powell (1967):** Sorts vertices statically by descending degree $\Delta(v)$ and colors maximal independent sets in sequential greedy passes ($O(V \log V + E)$).
-- **Exact DSatur Branch-and-Bound (Bounded to $N \le 25$):** Finds the exact chromatic number $\chi(G)$ by pre-coloring a maximum clique $\omega(G)$ at the root to break color permutation symmetry ($k!$ reduction), running with a 500 ms monotonic deadline clock.
-- **Theoretical Bounds:**
-  - **Clique Lower Bound:** $\chi(G) \ge \omega(G)$.
-  - **Brooks' Theorem Upper Bound:** $\chi(G) \le \Delta(G) + 1$.
+SpectraMap transforms this geospatial coordination problem into an exact graph-theoretic formulation:
+- **Vertices ($V$):** Physical cellular transceivers with latitude $\phi_i$, longitude $\lambda_i$, and coverage radius $r_i$.
+- **Edges ($E$):** Undirected interference links between transceiver pairs whose coverage disks overlap:
+  $$d(u, v) \le r_u + r_v$$
+  where $d(u, v)$ is the great-circle geodesic distance calculated using the spherical Haversine formula ($R = 6,371,000\text{ m}$).
+- **Colors ($k$):** Discrete non-interfering frequency channel assignments $f_1, f_2, \dots, f_k$.
+- **Validity Invariant:** For every edge $(u, v) \in E$, $c(u) \ne c(v)$.
+- **Independent Validation:** Post-allocation audit independently traverses every edge in $E$ to mathematically verify zero adjacent channel collisions.
+
+---
+
+## 2. Main Features
+
+- **Map-First Visualization Workspace:** Fullscreen Leaflet map with vivid OpenStreetMap cartography, customized DivIcon tower markers, translucent coverage discs, and high-visibility conflict vectors.
+- **Selective Dynamic Conflict Graph:** Luminous rose-crimson conflict lines connect only transceivers within verified overlap range ($d(u,v) \le r_u + r_v$). Distant non-interfering towers have zero edges.
+- **Focused Sub-Graph Inspection:** Clicking any tower highlights its localized conflict sub-graph in electric blue, highlights conflicting neighbors in warning amber, and dims non-incident nodes and edges.
+- **Dual Heuristic & Exact Solver Engine:**
+  - **DSatur (Brélaz, 1979):** Dynamically prioritizes vertices with maximum saturation degree $\text{sat}(v)$, achieving near-optimal chromatic numbers.
+  - **Welsh–Powell (1967):** Greedy maximal independent set coloring sorted by descending static degree $\Delta(v)$.
+  - **Exact DSatur Branch-and-Bound ($N \le 25$):** Pre-colors maximum cliques $\omega(G)$ to break $k!$ permutation symmetry and proves the exact chromatic number $\chi(G)$ with a strict 500 ms deadline clock.
+- **Theoretical Bounds Verification:** Formally tests Brooks' Theorem ($\chi(G) \le \Delta(G) + 1$) and the Clique Lower Bound ($\chi(G) \ge \omega(G)$).
+- **8-Card Live Analytics Dashboard:** Real-time metrics for Towers $|V|$, Conflicts $|E|$, Max Degree $\Delta(G)$, Graph Density $\rho$, 4G/5G Ratio, Channels Used $k$, Solver Latency (ms), and Independent Validation Status.
+- **Side-by-Side Algorithm Benchmark Card:** Direct comparison of DSatur vs Welsh-Powell channel counts, runtime speedup, and channel savings.
+- **Contextual Slide-Over Vertex Inspector:** Drawer displaying geographic coordinates, reported range, technology, MCC/MNC, LAC, degree $\deg(v)$, adjacent conflict neighbors, and blocked frequency channels.
+- **Dock Minimization & Responsive Controls:** Left Analysis Control sidebar collapses with `◀` / `☰ Controls` toggle; bottom Analytics Dock minimizes with `✕` / `📊 Show Results` button to unobstructed map views.
+- **Offline Demo Grid Fallback:** Built-in simulated 6-cell cellular cluster for instant offline demonstration without requiring external API keys.
 
 ---
 
 ## 3. Technology Stack
 
-- **Backend:** Python 3.14 + FastAPI
-- **Graph Engine:** NetworkX 3.7
-- **Distance Metric:** Great-circle geodesic distance via spherical Haversine formula (Earth radius $R = 6,371,000$ m)
-- **Frontend:** Vanilla HTML5, CSS3 (Glassmorphism & analytical typography), JavaScript (ES6+), Leaflet 1.9.4
-- **Topology View:** HTML5 Canvas force-directed graph renderer with HiDPI Retina support
-- **Data Source:** OpenCellID (ODbL / CC BY-SA 4.0) with local file caching and simulated grid fallback
-- **Test Framework:** Pytest 9.1.1 (191 automated unit and integration tests)
+- **Backend Framework:** FastAPI 0.143+ (Python 3.11 / 3.12 / 3.14 compatible)
+- **ASGI Production Server:** Uvicorn (standard with uvloop and httptools)
+- **Graph Algorithms & Modeling:** NetworkX 3.7
+- **Schema Validation & Parsing:** Pydantic v2
+- **HTTP Client:** HTTPX 0.28+ (asynchronous OpenCellID ingestion)
+- **Environment Management:** python-dotenv
+- **Frontend Architecture:** Vanilla JavaScript (ES6+), Leaflet 1.9.4, Modern CSS3 Glassmorphism
+- **Automated Test Suite:** Pytest 9.1+ with AnyIO and FastAPI TestClient
 
 ---
 
-## 4. API Endpoints
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/api/health` | Health and readiness check (`{"status": "ok", "app": "SpectraMap", "version": "2.0"}`) |
-| `GET` | `/api/status` | Backward-compatible status check |
-| `GET` | `/api/towers` | Query towers by `(lat, lon, radius_m)` or bounding box `(west, south, east, north)` |
-| `GET` | `/api/cells` | Backward-compatible tower query |
-| `POST` | `/api/graph/build` | Construct NetworkX interference graph from tower records ($d \le r_1 + r_2$) |
-| `POST` | `/api/optimize` | Run DSatur, Welsh-Powell, or dual optimization with independent conflict validation |
-| `POST` | `/api/compare` | Run side-by-side benchmark comparison on identical graph topology |
-
----
-
-## 5. Project Structure
+## 4. Project Directory Structure
 
 ```text
 SpectraMap/
-├── app.py                     # FastAPI application & REST routing
+├── app.py                     # FastAPI application, CORS, security headers & REST routes
 ├── data_service.py            # OpenCellID ingestion, Haversine geodesic math, local cache
-├── graph_engine.py            # NetworkX graph builder, DSatur, Welsh–Powell, Exact B&B, Validator
-├── schemas.py                 # Pydantic request & response validation schemas
-├── requirements.txt           # Pinned dependencies
-├── pytest.ini                 # Pytest configuration
-├── README.md                  # System architecture, formulation & viva guide
-├── data/                      # App-managed local cache (real tower clusters)
+├── graph_engine.py            # NetworkX graph builder, DSatur, Welsh-Powell, Exact B&B, Validator
+├── schemas.py                 # Pydantic v2 request & response validation schemas
+├── requirements.txt           # Production dependencies with version bounds
+├── .env.example               # Safe environment variable configuration template
+├── .gitignore                 # Comprehensive repository exclusions
+├── Dockerfile                 # Multi-stage, non-root production container
+├── docker-compose.yml         # Container orchestration specification
+├── pytest.ini                 # Pytest test discovery & runner configuration
+├── README.md                  # System architecture, deployment & operational manual
+├── PROJECT.md                 # Project path specification & milestone requirements
+├── TEST_INFRA.md              # Test infrastructure documentation
+├── TEST_READY.md              # Test readiness verification
+├── data/                      # App-managed local JSON cache (gitignored)
+├── docs/                      # Architectural specifications & PRDs
+│   ├── SpectraMap_Final_PRD.md
+│   └── SpectraMap_Final_System_Architecture.md
 ├── static/
-│   ├── index.html             # Responsive map-first workspace
-│   ├── style.css              # Glassmorphism dark UI, responsive layout
-│   └── app.js                 # Leaflet controller, Canvas graph explorer, vertex inspector
-├── docs/
-│   ├── SpectraMap_PRD_v2.md
-│   ├── SpectraMap_System_Architecture_v2.md
-│   └── SpectraMap_Frontend_Specification_v2.md
-└── tests/
-    ├── test_app.py            # API endpoint integration tests
-    ├── test_data_service.py   # Coordinate handling, Haversine, tiling tests
-    ├── test_graph_engine.py   # Graph algorithms, heuristic invariants, exact solver tests
-    ├── test_phase1_validation.py # Deep mathematical boundary and coordinate tests
-    └── test_v2_spec.py        # v2 specification and endpoint verification tests
+│   ├── index.html             # Accessible, responsive single-page application
+│   ├── style.css              # Custom dark glassmorphic styling & responsive layouts
+│   └── app.js                 # Leaflet controller, graph rendering, state machine
+└── tests/                     # 190+ automated empirical unit & integration tests
+    ├── test_app.py
+    ├── test_graph_engine.py
+    ├── test_data_service.py
+    ├── test_m3_frontend_structure.py
+    ├── test_m3_static_serving.py
+    └── stress_solvers.py
 ```
 
 ---
 
-## 6. Setup & Execution
+## 5. Prerequisites
 
-### 1. Environment Setup
+- **Python:** Version 3.11, 3.12, or 3.14.
+- **Package Manager:** `pip` (Python package installer).
+- **Git:** Version 2.30+ installed.
+- **Docker & Docker Compose (Optional):** For containerized deployment.
+- **OpenCellID API Key (Optional):** Required only for fetching live external cell towers. Offline Demo Grid runs with zero external credentials.
+
+---
+
+## 6. Installation & Local Development Setup
+
+### Step 1: Clone Repository
 ```bash
-# Activate your virtual environment
-.venv\Scripts\activate          # Windows PowerShell / CMD
-# source .venv/bin/activate     # Linux / macOS
+git clone https://github.com/dheerajrai-dev/SpectraMap.git
+cd SpectraMap
+```
 
-# Install dependencies
+### Step 2: Create & Activate Virtual Environment
+```bash
+# On Windows (PowerShell):
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+# On Linux / macOS:
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+### Step 3: Install Dependencies
+```bash
 pip install -r requirements.txt
 ```
 
-### 2. Configure Environment Variables
-Create `.env` from `.env.example`:
+### Step 4: Configure Environment Variables
+Copy the template to create a local `.env` file:
+```bash
+# On Windows (PowerShell):
+Copy-Item .env.example .env
+
+# On Linux / macOS:
+cp .env.example .env
+```
+Open `.env` in your editor and configure your settings:
 ```ini
 OPENCELLID_API_KEY=your_opencellid_api_key_here
+ENVIRONMENT=development
+LOG_LEVEL=INFO
+PORT=8000
+CORS_ORIGINS=*
 ```
-*(Note: SpectraMap includes local cached datasets for South Delhi, Connaught Place, and Mumbai, as well as an offline demo grid generator).*
+*(If you do not have an OpenCellID API key, you can still use the built-in "⚡ Demo Grid" immediately without any key).*
 
-### 3. Start the Server
+### Step 5: Start Development Server
 ```bash
-uvicorn app:app --reload --port 8000
+uvicorn app:app --reload --host 127.0.0.1 --port 8000
 ```
-Open your browser at: **`http://localhost:8000`**
-
-### 4. Run Automated Test Suite
-```bash
-pytest -v
-```
-All 191 tests run offline in under 3 seconds.
+Open your browser and navigate to: **`http://localhost:8000`**
 
 ---
 
-## 7. Interactive Viva Demonstration Script
+## 7. Data Storage & Cache Architecture
 
-1. **Geographic Selection:** Choose preset *"South Delhi (100+ Live Towers)"* or click *"⚡ Demo Grid"*.
-2. **Tower Ingestion:** Click *"📡 Fetch Towers"*. Towers appear with stable alphabetic labels (`A`, `B`, `C`...).
-3. **Graph Construction:** The interference graph is built using $d(u,v) \le r_u + r_v$. Notice that the graph is selective—distant towers have no edge lines connecting them.
-4. **Topology Exploration:** Switch to the *"🕸️ Graph Topology"* tab to inspect the force-directed canvas. Node size reflects graph degree $\Delta(v)$.
-5. **Sensitivity Analysis:** Adjust the *"Coverage Radius Override"* slider from 0 to 1200m and watch the edge count and graph density increase as coverage disks expand.
-6. **Heuristic Execution:** Click *"⚡ Optimize Frequencies"* with Dual Comparison. Both DSatur and Welsh-Powell color the graph with zero conflicts.
-7. **Solver Benchmark:** Click *"⚖️ Compare Solvers"* to view the side-by-side performance matrix, runtime in milliseconds, direct channel agreement percentage, and theoretical bounds guarantees ($\chi(G) \ge \omega(G)$).
-8. **Contextual Inspector:** Click any tower on the map or graph. The slide-over drawer shows its coordinates, degree, assigned channel, blocked neighbor channels, and step-by-step allocation rationale.
+SpectraMap employs a local, file-based caching layer under the `data/` directory (gitignored):
+- **Cache File Format:** `data/cache_{latmin}_{lonmin}_{latmax}_{lonmax}.json`
+- **Path Traversal Protection:** All bounding box coordinates are sanitized to alphanumeric characters, and target paths are verified to remain within the `data/` directory root.
+- **Time-to-Live (TTL):** Cached query tiles have an automatic 24-hour expiration window with graceful offline fallback if the upstream API is unavailable.
+- **Zero Database Requirement:** The application is stateless and lightweight, requiring no external relational or NoSQL database servers.
+
+---
+
+## 8. REST API Documentation
+
+### System Endpoints
+- `GET /` — Serves the frontend single-page application (`static/index.html`).
+- `GET /api/health` — Production healthcheck probe returning `{"status": "ok", "app": "SpectraMap", "version": "2.0"}`.
+- `GET /api/status` — Backward-compatible application readiness check.
+
+### Transceiver Data Endpoints
+- `GET /api/towers` — Ingests and returns cell transceivers within a geographic radius or bounding box.
+  - Parameters: `lat`, `lon`, `radius_m` (default 1500m, max 5000m), `radios` (`4G`, `5G`), `limit` (10–200), `aggregate_2m` (bool).
+- `GET /api/cells` — Backward-compatible alias for tower query.
+
+### Graph Optimization Endpoints
+- `POST /api/graph/build` — Constructs the NetworkX interference graph from transceivers and computes topological metrics ($|V|$, $|E|$, $\Delta(G)$, $\rho$).
+- `POST /api/optimize` — Runs frequency allocation heuristics (DSatur, Welsh-Powell, or Both) and returns conflict-free channel assignments with validation.
+- `POST /api/compare` — Executes both DSatur and Welsh–Powell simultaneously on the identical graph topology and returns a comparative performance breakdown.
+
+---
+
+## 9. Automated Testing & Verification
+
+Run the comprehensive automated test suite with `pytest`:
+
+```bash
+# Run all unit, integration, and mathematical boundary tests
+pytest -v
+
+# Run frontend DOM and structural verification tests
+pytest tests/test_m3_frontend_structure.py -v
+
+# Run graph coloring algorithm & theoretical bounds tests
+pytest tests/test_graph_engine.py -v
+```
+
+All unit and integration tests run completely offline and finish in under 3 seconds.
+
+---
+
+## 10. Production Deployment
+
+### Option A: Docker Deployment (Recommended)
+
+1. Build and launch with Docker Compose:
+```bash
+docker compose up -d --build
+```
+2. Verify container status and health:
+```bash
+docker compose ps
+curl http://localhost:8000/api/health
+```
+3. View production container logs:
+```bash
+docker compose logs -f
+```
+
+### Option B: Linux Systemd + Gunicorn / Uvicorn Service
+
+1. Create a system user and deploy files to `/opt/spectramap`.
+2. Install production dependencies into a clean virtual environment:
+   ```bash
+   /opt/spectramap/.venv/bin/pip install -r /opt/spectramap/requirements.txt
+   ```
+3. Create `/etc/systemd/system/spectramap.service`:
+   ```ini
+   [Unit]
+   Description=SpectraMap Cellular Frequency Optimization Service
+   After=network.target
+
+   [Service]
+   User=www-data
+   Group=www-data
+   WorkingDirectory=/opt/spectramap
+   EnvironmentFile=/opt/spectramap/.env
+   ExecStart=/opt/spectramap/.venv/bin/uvicorn app:app --host 127.0.0.1 --port 8000 --workers 4
+   Restart=always
+   RestartSec=5
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+4. Enable and start service:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now spectramap
+   ```
+
+### Option C: Nginx Reverse Proxy Configuration
+
+```nginx
+server {
+    listen 80;
+    server_name spectramap.example.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+---
+
+## 11. Security Architecture & Considerations
+
+- **Zero Hardcoded Credentials:** Real API keys and secrets are strictly excluded from version control and loaded exclusively via environment variables.
+- **Git Protection:** `.gitignore` excludes `.env`, `data/`, `*.log`, `.venv/`, and temporary build artifacts.
+- **Path Traversal Mitigation:** Cache file resolution uses strict character whitelisting and validates absolute canonical paths against the target data directory.
+- **Defensive Security Headers:** Automatically injected on all HTTP responses:
+  - `X-Content-Type-Options: nosniff`
+  - `X-Frame-Options: DENY`
+  - `Referrer-Policy: strict-origin-when-cross-origin`
+  - `X-XSS-Protection: 1; mode=block`
+- **Cross-Site Scripting (XSS) Prevention:** Frontend renders dynamic data attributes using DOM `textContent` and an `escapeHtml` utility for any interpolated HTML template strings.
+- **Non-Root Container Execution:** Docker image runs under an unprivileged `appuser` (UID 1000).
+- **Query Parameter Boundary Validation:** Pydantic and FastAPI `Query` schemas strictly enforce ranges on all inputs (`lat`: [-90, 90], `lon`: [-180, 180], `radius_m`: [50, 5000], `limit`: [10, 200]).
+
+---
+
+## 12. Troubleshooting
+
+| Issue | Root Cause | Solution |
+|---|---|---|
+| **HTTP 503 "OpenCellID API key is not configured"** | Missing `OPENCELLID_API_KEY` in `.env` | Set key in `.env`, or click **"⚡ Demo Grid"** in the top bar for instant offline testing. |
+| **"Zero valid tower records available"** | Requested search coordinates have no cellular masts | Choose preset *"South Delhi"* or expand the search radius slider to 2500m. |
+| **Port 8000 already in use** | Another instance or process is occupying port 8000 | Run on a different port: `uvicorn app:app --port 8080`, or kill the occupying process. |
+| **Missing Module Errors** | Virtual environment not activated or dependencies not installed | Activate `.venv` and run `pip install -r requirements.txt`. |
+
+---
+
+## 13. License & Attribution
+
+- **Application License:** MIT License.
+- **Cellular Data Attribution:** Crowd-sourced cellular base station data provided by [OpenCellID](https://opencellid.org), licensed under Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0).
+- **Map Tiles Attribution:** Base cartography &copy; [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors.

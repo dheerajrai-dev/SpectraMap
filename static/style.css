@@ -11,11 +11,18 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 html, body {
-    height: 100%; height: 100dvh; font-family: var(--font-sans); background-color: var(--bg-base);
-    color: var(--text-primary); overflow: hidden; -webkit-font-smoothing: antialiased;
+    height: 100%; height: 100dvh; width: 100%; width: 100vw;
+    margin: 0; padding: 0;
+    overflow: hidden;
+    position: fixed; inset: 0;
+    font-family: var(--font-sans); background-color: var(--bg-base);
+    color: var(--text-primary); -webkit-font-smoothing: antialiased;
 }
 
-.workspace { display: flex; flex-direction: column; height: 100%; width: 100vw; }
+.workspace {
+    display: flex; flex-direction: column; height: 100%; width: 100%;
+    position: relative; overflow: hidden;
+}
 
 /* ==========================================================================
    1. Top Navigation Bar
@@ -82,7 +89,7 @@ html, body {
 }
 
 .colorful-tiles, .leaflet-tile-pane img {
-    filter: saturate(1.22) contrast(1.06) brightness(1.02);
+    filter: saturate(0.85) contrast(1.05) brightness(0.92);
 }
 
 .map-overlay {
@@ -94,28 +101,42 @@ html, body {
 
 .tower-marker-wrap {
     display: flex; flex-direction: column; align-items: center;
-    justify-content: center; cursor: pointer; transition: transform 0.15s ease;
+    justify-content: center; cursor: pointer; transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
-.tower-marker-wrap:hover { transform: scale(1.15); z-index: 1000 !important; }
+.tower-marker-wrap:hover { transform: scale(1.18); z-index: 1000 !important; }
 
 .tower-marker-circle {
-    min-width: 24px; height: 24px; padding: 0 4px; border-radius: 12px; display: inline-flex; align-items: center; justify-content: center; gap: 2px; color: #ffffff;
-    font-size: 0.68rem; font-weight: 700; font-family: var(--font-mono); border: 2px solid #ffffff; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6); background-color: var(--bg-surface); transition: all 0.2s ease; white-space: nowrap;
+    min-width: 28px; height: 28px; padding: 0 5px; border-radius: 14px; display: inline-flex; align-items: center; justify-content: center; gap: 3px; color: #ffffff;
+    font-size: 0.72rem; font-weight: 700; font-family: var(--font-mono); border: 2px solid rgba(255, 255, 255, 0.95); box-shadow: 0 3px 10px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(0, 0, 0, 0.25); background-color: var(--bg-surface); transition: all 0.2s ease; white-space: nowrap;
 }
 
-.marker-label { font-weight: 800; letter-spacing: -0.02em; }
+.marker-label { font-weight: 800; letter-spacing: -0.02em; font-size: 0.75rem; }
 
 .marker-freq-sub {
-    font-size: 0.58rem; padding: 0 3px; border-radius: 3px; background: rgba(0, 0, 0, 0.5);
-    margin-left: 2px; color: #ffffff; font-weight: 700;
+    font-size: 0.60rem; padding: 1px 4px; border-radius: 4px; background: rgba(0, 0, 0, 0.65);
+    margin-left: 2px; color: #ffffff; font-weight: 800; border: 1px solid rgba(255, 255, 255, 0.25);
 }
 
-.tower-marker-circle.neighbor-marker { border-color: #38bdf8 !important; box-shadow: 0 0 12px rgba(56, 189, 248, 0.85), 0 0 0 2px rgba(56, 189, 248, 0.45); transform: scale(1.10); z-index: 1050 !important; }
+.tower-marker-circle.selected-marker {
+    border-color: #38bdf8 !important;
+    box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.45), 0 0 22px rgba(56, 189, 248, 0.95), 0 4px 14px rgba(0, 0, 0, 0.8) !important;
+    transform: scale(1.28);
+    z-index: 1100 !important;
+}
 
-.tower-marker-circle.dimmed-marker { opacity: 0.20 !important; transform: scale(0.82); filter: grayscale(40%); }
+.tower-marker-circle.neighbor-marker {
+    border-color: #f59e0b !important;
+    box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.45), 0 0 14px rgba(245, 158, 11, 0.85), 0 3px 8px rgba(0, 0, 0, 0.6) !important;
+    transform: scale(1.12);
+    z-index: 1050 !important;
+}
 
-.tower-marker-circle.selected-marker { border-color: #f59e0b !important; box-shadow: 0 0 18px rgba(245, 158, 11, 0.95), 0 0 0 3px rgba(245, 158, 11, 0.50); transform: scale(1.25); z-index: 1100 !important; }
+.tower-marker-circle.dimmed-marker {
+    opacity: 0.22 !important;
+    transform: scale(0.85);
+    filter: grayscale(60%);
+}
 
 /* ==========================================================================
    3. Floating Left Control Panel Dock (5 Streamlined Sections)
@@ -124,6 +145,81 @@ html, body {
 .control-dock {
     position: absolute; top: 14px; left: 14px; width: 330px; max-height: calc(100% - 150px); overflow-y: auto; background: var(--bg-dock); backdrop-filter: blur(20px);
     border: 1px solid var(--border-subtle); border-radius: 12px; box-shadow: var(--shadow-dock); z-index: 1000; padding: 1.15rem; display: flex; flex-direction: column; gap: 0.85rem;
+    transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease;
+}
+
+.control-dock.collapsed {
+    transform: translateX(calc(-100% - 24px));
+    pointer-events: none;
+    opacity: 0;
+}
+
+body.control-collapsed .analytics-dock {
+    left: 14px;
+}
+
+.dock-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.dock-header-text {
+    display: flex;
+    flex-direction: column;
+}
+
+.btn-dock-toggle, .btn-dock-close {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--border-subtle);
+    color: var(--text-muted);
+    border-radius: 6px;
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 0.78rem;
+    line-height: 1;
+    padding: 0;
+    transition: all 0.15s ease;
+    flex-shrink: 0;
+}
+
+.btn-dock-toggle:hover, .btn-dock-close:hover {
+    background: rgba(239, 68, 68, 0.2);
+    color: #ef4444;
+    border-color: rgba(239, 68, 68, 0.4);
+    transform: scale(1.05);
+}
+
+.floating-dock-reopen {
+    position: absolute;
+    top: 14px;
+    left: 14px;
+    z-index: 1001;
+    background: var(--bg-dock);
+    backdrop-filter: blur(20px);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    color: var(--text-primary);
+    padding: 0.45rem 0.85rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    box-shadow: var(--shadow-dock);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    transition: all 0.2s ease;
+}
+
+.floating-dock-reopen:hover {
+    background: var(--bg-surface-elevated, #1e293b);
+    border-color: var(--accent-primary, #38bdf8);
+    transform: translateY(-1px);
 }
 
 .dock-header h2 { font-size: 0.92rem; font-weight: 700; letter-spacing: -0.01em; color: var(--text-primary); }
@@ -407,7 +503,63 @@ html, body {
 
 .analytics-dock {
     position: absolute; bottom: 14px; left: 360px; right: 14px; background: var(--bg-dock); backdrop-filter: blur(20px); border: 1px solid var(--border-subtle); border-radius: 12px; box-shadow: var(--shadow-dock);
-    z-index: 1000; padding: 0.75rem 1rem; display: flex; flex-direction: column; gap: 0.65rem; transition: right 0.28s cubic-bezier(0.16, 1, 0.3, 1), left 0.28s cubic-bezier(0.16, 1, 0.3, 1); max-height: 48vh; overflow-y: auto;
+    z-index: 1000; padding: 0.75rem 1rem; display: flex; flex-direction: column; gap: 0.65rem; transition: right 0.28s cubic-bezier(0.16, 1, 0.3, 1), left 0.28s cubic-bezier(0.16, 1, 0.3, 1), transform 0.28s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease; max-height: 48vh; overflow-y: auto;
+}
+
+.analytics-dock.minimized {
+    transform: translateY(calc(100% + 24px));
+    pointer-events: none;
+    opacity: 0;
+}
+
+.analytics-dock-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 0.35rem;
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.analytics-dock-title {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+}
+
+.analytics-title-icon {
+    font-size: 0.85rem;
+}
+
+.floating-analytics-reopen {
+    position: absolute;
+    bottom: 14px;
+    right: 14px;
+    z-index: 1001;
+    background: var(--bg-dock);
+    backdrop-filter: blur(20px);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    color: var(--text-primary);
+    padding: 0.5rem 1rem;
+    font-size: 0.82rem;
+    font-weight: 600;
+    box-shadow: var(--shadow-dock);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    transition: all 0.2s ease;
+}
+
+.floating-analytics-reopen:hover {
+    background: var(--bg-surface-elevated, #1e293b);
+    border-color: var(--accent-primary, #38bdf8);
+    transform: translateY(-1px);
 }
 
 .analytics-dock.with-inspector { right: 368px; }

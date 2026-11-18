@@ -79,11 +79,24 @@
                 <span>Center: 28.52240°, 77.19060° (Click map to change)</span>
             </div>
 
+            <!-- Floating Button to Re-open Left Control Dock -->
+            <button id="btn-expand-control" class="floating-dock-reopen" style="display: none;" title="Open Analysis Control" aria-label="Open Analysis Control">
+                <span class="icon">⚙️</span> Analysis Control
+            </button>
+
+            <!-- Floating Button to Re-open Bottom Analytics Dock -->
+            <button id="btn-expand-analytics" class="floating-analytics-reopen" style="display: none;" title="Show Results &amp; Assignments" aria-label="Show Results and Assignments">
+                <span class="icon">📊</span> Show Results &amp; Assignments
+            </button>
+
             <!-- Floating Left Control Panel Dock (5 Explicit Sections) -->
             <aside class="control-dock" id="control-dock" aria-label="Analysis Control Panel">
                 <div class="dock-header">
-                    <h2>Analysis Control</h2>
-                    <span class="dock-subtitle">Geospatial spectrum allocation pipeline</span>
+                    <div class="dock-header-text">
+                        <h2>Analysis Control</h2>
+                        <span class="dock-subtitle">Geospatial spectrum allocation pipeline</span>
+                    </div>
+                    <button id="btn-toggle-control" class="btn-dock-toggle" title="Collapse sidebar" aria-label="Collapse sidebar">◀</button>
                 </div>
 
                 <!-- ITEM 1: Geographic Area Selection -->
@@ -279,6 +292,11 @@
                             <span class="toggle-track"></span>
                             <span class="toggle-text">Cell Markers &amp; Labels</span>
                         </label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="toggle-edges" checked />
+                            <span class="toggle-track"></span>
+                            <span class="toggle-text">Conflict Edges (In Range)</span>
+                        </label>
                     </div>
                     <div class="coverage-opacity-wrap" style="margin-top: 0.5rem;">
                         <div class="slider-header" style="font-size: 0.72rem; display: flex; justify-content: space-between; margin-bottom: 2px;">
@@ -390,6 +408,15 @@
 
             <!-- Bottom Floating Analytics & Scoreboard Dock -->
             <footer class="analytics-dock" id="analytics-dock" role="region" aria-label="Results Analytics Dashboard">
+                <!-- Analytics Dock Header Bar with Close/Minimize Button -->
+                <div class="analytics-dock-header">
+                    <div class="analytics-dock-title">
+                        <span class="analytics-title-icon">📊</span>
+                        <span class="analytics-title-text">Network Analytics &amp; Frequency Allocations</span>
+                    </div>
+                    <button id="btn-close-analytics" class="btn-dock-close" title="Close / Minimize Results Panel" aria-label="Close Analytics Panel">✕</button>
+                </div>
+
                 <!-- Row 1: KPI Metrics Grid (8 Core Metrics) -->
                 <div class="kpi-grid" id="dashboard-kpi-grid">
                     <!-- 1. Towers / Vertices |V| -->

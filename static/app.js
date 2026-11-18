@@ -11,7 +11,7 @@ const state = {
     adjacencyIndex: {}, degreeMap: {}, optimizationResults: null, currentAssignments: null,
     activeIsolatedFreq: null, pipelineState: "Connecting", aggregate2m: true,
     coverageOpacity: 0.18,
-    map: null, centerMarker: null, centerCircle: null, markersLayer: null, circlesLayer: null,
+    map: null, centerMarker: null, centerCircle: null, markersLayer: null, circlesLayer: null, edgesLayer: null,
     markersById: {}, coverageCirclesById: {},
 };
 
@@ -26,6 +26,16 @@ function setElemText(id, text) {
 function setElemHtml(id, html) {
     const el = document.getElementById(id);
     if (el) el.innerHTML = html;
+}
+
+function escapeHtml(str) {
+    if (str === null || str === undefined) return "";
+    return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
 }
 
 function on(id, evt, fn) { const el = document.getElementById(id); if (el) el.addEventListener(evt, fn); }
@@ -61,6 +71,7 @@ function initMap() {
         attribution: "&copy; OpenStreetMap contributors", maxZoom: 19, className: "colorful-tiles",
     }).addTo(state.map);
     state.circlesLayer = L.layerGroup().addTo(state.map);
+    state.edgesLayer = L.layerGroup().addTo(state.map);
     state.markersLayer = L.layerGroup().addTo(state.map);
     const map = state.map;
     map.on("click", (e) => { setNewCenter(e.latlng.lat, e.latlng.lng, null, "Map Click"); invalidateOptimizationState("Map clicked"); fetchNearbyCells(); });
@@ -168,6 +179,46 @@ function initControls() {
     on("btn-close-compare", "click", () => { const m = document.getElementById("compare-modal"); if (m) { m.classList.remove("open"); m.setAttribute("aria-hidden", "true"); } });
     on("btn-clear-isolate", "click", clearFrequencyIsolation);
 
+    // Sidebar & Dashboard dock collapse/expand handlers
+    on("btn-toggle-control", "click", () => {
+        const dock = document.getElementById("control-dock");
+        const reopen = document.getElementById("btn-expand-control");
+        if (dock) dock.classList.add("collapsed");
+        document.body.classList.add("control-collapsed");
+        if (reopen) reopen.style.display = "flex";
+    });
+    on("btn-expand-control", "click", () => {
+        const dock = document.getElementById("control-dock");
+        const reopen = document.getElementById("btn-expand-control");
+        if (dock) dock.classList.remove("collapsed");
+        document.body.classList.remove("control-collapsed");
+        if (reopen) reopen.style.display = "none";
+    });
+    on("btn-close-analytics", "click", () => {
+        const dock = document.getElementById("analytics-dock");
+        const reopen = document.getElementById("btn-expand-analytics");
+        if (dock) dock.classList.add("minimized");
+        if (reopen) reopen.style.display = "flex";
+    });
+    on("btn-expand-analytics", "click", () => {
+        const dock = document.getElementById("analytics-dock");
+        const reopen = document.getElementById("btn-expand-analytics");
+        if (dock) dock.classList.remove("minimized");
+        if (reopen) reopen.style.display = "none";
+    });
+
+    on("toggle-edges", "change", (e) => {
+        if (!state.map || !state.edgesLayer) return;
+        if (e.target.checked) {
+            renderInterferenceEdges(state.interferenceEdges);
+            if (!state.map.hasLayer(state.edgesLayer)) {
+                state.map.addLayer(state.edgesLayer);
+            }
+        } else {
+            state.edgesLayer.clearLayers();
+        }
+    });
+
     initAssignmentTableEvents();
 }
 
@@ -219,6 +270,7 @@ function setPipelineState(stateName, details = "") {
 
 function invalidateOptimizationState(reason = "") {
     state.optimizationResults = null; state.currentAssignments = null; state.activeIsolatedFreq = null; state.isolatedFrequency = null;
+    if (state.edgesLayer) state.edgesLayer.clearLayers();
     const legendContainer = document.getElementById("legend-container");
     if (legendContainer) legendContainer.style.display = "none";
     const valBadge = document.getElementById("metric-validation-badge");
@@ -274,10 +326,12 @@ function renderAssignmentTable(assignments, cells) {
         const freqColor = colorIdx !== null ? getFrequencyColor(colorIdx) : "#64748b", freqText = colorIdx !== null ? `f${colorIdx + 1}` : "—";
         const degree = state.degreeMap?.[tid] ?? "0", isSelected = state.selectedTowerId === tid ? " selected-row" : "";
         const radiusM = Math.round(Number(cell.range_m) || 800), shortTid = tid.length > 18 ? `${tid.slice(0, 10)}…${tid.slice(-4)}` : tid;
+        const radio = (cell.radio || "4G").toUpperCase();
+        const radioClass = radio === "5G" ? "badge-tech-5g" : "badge-tech-4g";
         return `<tr class="assignment-row${isSelected}" data-tower-id="${tid}" onclick="selectCellFromTable('${tid}')">` +
             `<td><span class="cell-label-pill" style="border-color:${freqColor}; color:${freqColor};">${cell.label}</span></td>` +
             `<td class="font-mono text-xs" title="${tid}">${shortTid}</td>` +
-            `<td><span class="badge-tech-${cell.radio.toLowerCase()}">${cell.radio}</span></td>` +
+            `<td><span class="${radioClass}">${radio}</span></td>` +
             `<td><span class="badge-channel" style="border-color:${freqColor}; color:${freqColor};"><span class="channel-dot" style="background:${freqColor};"></span>${freqText}</span></td>` +
             `<td class="font-mono text-xs">${radiusM} m</td>` +
             `<td class="font-mono text-xs">${degree}</td></tr>`;
@@ -298,10 +352,26 @@ function selectCellFromTable(towerId) {
 
 function updateAssignmentTableRowSelection(towerId) {
     if (typeof document.querySelectorAll !== "function") return;
+    const dock = document.getElementById("analytics-dock");
+    const isMinimized = dock ? dock.classList.contains("minimized") : false;
+    const wrapper = document.getElementById("assignment-table-wrapper");
+
     document.querySelectorAll(".assignment-row").forEach((row) => {
         if (towerId && row.dataset.towerId === towerId) {
             row.classList.add("selected-row");
-            if (typeof row.scrollIntoView === "function") row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+            // If the dock is minimized, NEVER scroll to prevent window viewport shifting
+            if (!isMinimized) {
+                if (wrapper && typeof row.offsetTop === "number" && row.offsetTop > 0) {
+                    const rowTop = row.offsetTop;
+                    const wrapperScroll = wrapper.scrollTop;
+                    const wrapperHeight = wrapper.clientHeight;
+                    if (rowTop < wrapperScroll || rowTop > wrapperScroll + wrapperHeight - 40) {
+                        wrapper.scrollTo({ top: Math.max(0, rowTop - 30), behavior: "smooth" });
+                    }
+                } else if (typeof row.scrollIntoView === "function") {
+                    row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+                }
+            }
         } else {
             row.classList.remove("selected-row");
         }
@@ -380,6 +450,8 @@ function buildGraphAdjacencyIndex(edges) {
 function updateMapVisualStyles() {
     const selectedId = state.selectedTowerId;
     const neighbors = selectedId && state.adjacencyIndex?.[selectedId] ? state.adjacencyIndex[selectedId] : [];
+
+    // 1. Synchronized Marker styling
     if (state.cells) {
         state.cells.forEach((cell) => {
             const tid = cell.tower_id, circleEl = document.getElementById(`marker-circle-${tid}`);
@@ -388,6 +460,75 @@ function updateMapVisualStyles() {
             if (tid === selectedId) circleEl.classList.add("selected-marker");
             else if (neighbors.includes(tid)) circleEl.classList.add("neighbor-marker");
             else if (selectedId) circleEl.classList.add("dimmed-marker");
+        });
+    }
+
+    // 2. Focused Coverage Circles: dim non-neighbors when a tower is selected to eliminate clutter
+    if (state.coverageCirclesById) {
+        const algoKey = typeof getSelectedAlgoKey === "function" ? getSelectedAlgoKey() : "dsatur";
+        const coloring = state.optimizationResults?.[algoKey]?.coloring || state.currentAssignments || null;
+
+        Object.entries(state.coverageCirclesById).forEach(([tid, circle]) => {
+            const ch = coloring && coloring[tid] !== undefined ? Number(coloring[tid]) : null;
+            const baseColor = ch !== null ? getFrequencyColor(ch) : "#64748b";
+
+            if (selectedId) {
+                if (tid === selectedId) {
+                    circle.setStyle({
+                        color: "#38bdf8",
+                        weight: 2.5,
+                        opacity: 0.95,
+                        fillColor: baseColor,
+                        fillOpacity: ch !== null ? 0.22 : 0.08,
+                        dashArray: null
+                    });
+                    if (circle.bringToFront) circle.bringToFront();
+                } else if (neighbors.includes(tid)) {
+                    circle.setStyle({
+                        color: "#f59e0b",
+                        weight: 2.0,
+                        opacity: 0.85,
+                        fillColor: baseColor,
+                        fillOpacity: ch !== null ? 0.16 : 0.05,
+                        dashArray: "4, 4"
+                    });
+                } else {
+                    circle.setStyle({
+                        color: "#64748b",
+                        weight: 0.8,
+                        opacity: 0.10,
+                        fillColor: baseColor,
+                        fillOpacity: 0.02,
+                        dashArray: null
+                    });
+                }
+            } else {
+                circle.setStyle({
+                    color: ch !== null ? baseColor : "#64748b",
+                    weight: ch !== null ? 1.6 : 1.2,
+                    opacity: ch !== null ? 0.65 : 0.30,
+                    fillColor: baseColor,
+                    fillOpacity: ch !== null ? (state.coverageOpacity || 0.14) : 0.0,
+                    dashArray: null
+                });
+            }
+        });
+    }
+
+    // 3. Conflict Edges highlight & dimming
+    if (state.edgesLayer) {
+        state.edgesLayer.eachLayer((layer) => {
+            if (!layer._edgeSource || !layer._edgeTarget) return;
+            if (selectedId) {
+                if (layer._edgeSource === selectedId || layer._edgeTarget === selectedId) {
+                    layer.setStyle({ color: "#38bdf8", weight: 4.5, opacity: 1.0, dashArray: null });
+                    if (layer.bringToFront) layer.bringToFront();
+                } else {
+                    layer.setStyle({ color: "#f43f5e", weight: 1.2, opacity: 0.12, dashArray: "4, 6" });
+                }
+            } else {
+                layer.setStyle({ color: "#f43f5e", weight: 3.0, opacity: 0.85, dashArray: "7, 5" });
+            }
         });
     }
 }
@@ -661,6 +802,7 @@ function renderCellTowers(cells, coloring = null) {
     if (!state.map) return;
     if (state.markersLayer) state.markersLayer.clearLayers();
     if (state.circlesLayer) state.circlesLayer.clearLayers();
+    if (state.edgesLayer) state.edgesLayer.clearLayers();
     state.markersById = {}; state.coverageCirclesById = {};
     if (!cells || cells.length === 0) return;
 
@@ -683,8 +825,8 @@ function renderCellTowers(cells, coloring = null) {
         state.markersById[tid] = marker;
 
         state.coverageCirclesById[tid] = L.circle([lat, lon], {
-            radius: radiusM, fill: ch !== null, fillColor: freqColor, fillOpacity: ch !== null ? 0.18 : 0.0,
-            color: ch !== null ? freqColor : "#64748b", weight: ch !== null ? 2.0 : 1.5, opacity: ch !== null ? 0.85 : 0.35,
+            radius: radiusM, fill: ch !== null, fillColor: freqColor, fillOpacity: ch !== null ? (state.coverageOpacity || 0.14) : 0.0,
+            color: ch !== null ? freqColor : "#64748b", weight: ch !== null ? 1.6 : 1.2, opacity: ch !== null ? 0.65 : 0.30,
         }).addTo(state.circlesLayer);
     });
     updateMapVisualStyles();
@@ -697,6 +839,7 @@ function getSelectedAlgoKey() {
 }
 
 function closeVertexInspector() {
+    if (typeof window !== "undefined" && window.scrollTo) window.scrollTo(0, 0);
     const drawer = document.getElementById("vertex-inspector");
     if (drawer) { drawer.classList.remove("open"); drawer.setAttribute("aria-hidden", "true"); }
     state.selectedTowerId = null;
@@ -706,6 +849,7 @@ function closeVertexInspector() {
 }
 
 function openVertexInspector(towerId) {
+    if (typeof window !== "undefined" && window.scrollTo) window.scrollTo(0, 0);
     state.selectedTowerId = towerId;
     if (typeof updateMapVisualStyles === "function") updateMapVisualStyles();
     if (typeof updateAssignmentTableRowSelection === "function") updateAssignmentTableRowSelection(towerId);
@@ -779,6 +923,7 @@ async function runFrequencyOptimization() {
         state.optimizationResults = { welsh_powell: data.welsh_powell, dsatur: data.dsatur, exact: data.exact, best_algorithm: data.best_algorithm, metrics: data.metrics };
         state.interferenceEdges = data.edges || [];
         if (typeof buildGraphAdjacencyIndex === "function") buildGraphAdjacencyIndex(state.interferenceEdges);
+        renderInterferenceEdges(state.interferenceEdges);
         if (typeof updateScoreboard === "function") updateScoreboard(state.optimizationResults);
 
         const pillDsatur = document.getElementById("pill-dsatur"), pillWp = document.getElementById("pill-wp"), pillExact = document.getElementById("pill-exact");
@@ -844,6 +989,7 @@ async function buildInterferenceGraphUI(userInitiated = false) {
 
         state.interferenceEdges = data.edges || [];
         if (typeof buildGraphAdjacencyIndex === "function") buildGraphAdjacencyIndex(state.interferenceEdges);
+        renderInterferenceEdges(state.interferenceEdges);
         updateDashboardMetrics(data.metrics, null, null, state.cells);
         updateMapVisualStyles();
         renderAssignmentTable(state.optimizationResults?.[getSelectedAlgoKey()]?.coloring || null, state.cells);
@@ -893,6 +1039,7 @@ async function runComparisonDirectly() {
         if (data.edges && data.edges.length > 0) {
             state.interferenceEdges = data.edges;
             if (typeof buildGraphAdjacencyIndex === "function") buildGraphAdjacencyIndex(state.interferenceEdges);
+            renderInterferenceEdges(state.interferenceEdges);
         }
 
         if (typeof updateScoreboard === "function") updateScoreboard(state.optimizationResults);
@@ -901,13 +1048,108 @@ async function runComparisonDirectly() {
         if (typeof setPipelineState === "function") setPipelineState("Completed", "Benchmark comparison complete.");
     } catch (err) {
         console.error("Comparison request failed:", err);
-        if (container) container.innerHTML = `<div class="compare-placeholder" style="color:var(--accent-rose);font-weight:600;">Error: ${err.message}</div>`;
+        if (container) container.innerHTML = `<div class="compare-placeholder" style="color:var(--accent-rose);font-weight:600;">Error: ${escapeHtml(err.message)}</div>`;
         if (typeof setPipelineState === "function") setPipelineState("Failed", `Comparison failed: ${err.message}`);
     }
 }
 
 function renderInterferenceEdges(edges) {
-    if (state.edgesLayer) state.edgesLayer.clearLayers();
+    if (!state.map) return;
+    if (!state.edgesLayer) {
+        state.edgesLayer = L.layerGroup().addTo(state.map);
+    }
+    state.edgesLayer.clearLayers();
+    if (!edges || edges.length === 0) return;
+
+    const toggleEl = document.getElementById("toggle-edges");
+    if (toggleEl && !toggleEl.checked) return;
+
+    const cellMap = {};
+    (state.cells || []).forEach((c) => {
+        if (c.tower_id) cellMap[c.tower_id] = c;
+        if (c.id) cellMap[c.id] = c;
+        if (c.cell_id) cellMap[String(c.cell_id)] = c;
+    });
+
+    edges.forEach((edge) => {
+        const u = edge.source_id || edge.source;
+        const v = edge.target_id || edge.target;
+        const uCell = cellMap[u];
+        const vCell = cellMap[v];
+
+        let lat1, lon1, lat2, lon2;
+        if (edge.source_coords && edge.source_coords.length === 2) {
+            [lat1, lon1] = edge.source_coords;
+        } else if (uCell) {
+            lat1 = uCell.latitude ?? uCell.lat;
+            lon1 = uCell.longitude ?? uCell.lon;
+        }
+
+        if (edge.target_coords && edge.target_coords.length === 2) {
+            [lat2, lon2] = edge.target_coords;
+        } else if (vCell) {
+            lat2 = vCell.latitude ?? vCell.lat;
+            lon2 = vCell.longitude ?? vCell.lon;
+        }
+
+        if (lat1 === undefined || lon1 === undefined || lat2 === undefined || lon2 === undefined) return;
+
+        const dist = Math.round(edge.distance_m || 0);
+        const r1 = uCell?.range_m || 800;
+        const r2 = vCell?.range_m || 800;
+        const thresh = Math.round(edge.threshold_m || (r1 + r2));
+
+        // Connect edges strictly if in range: distance <= threshold
+        if (thresh > 0 && dist > thresh) return;
+
+        const uLabel = uCell?.label || u;
+        const vLabel = vCell?.label || v;
+        const uRadio = (uCell?.radio || "4G").toUpperCase();
+        const vRadio = (vCell?.radio || "4G").toUpperCase();
+
+        const polyline = L.polyline([[lat1, lon1], [lat2, lon2]], {
+            color: "#f43f5e",
+            weight: 3.0,
+            opacity: 0.85,
+            dashArray: "7, 5",
+            lineCap: "round",
+            lineJoin: "round"
+        });
+
+        polyline._edgeSource = u;
+        polyline._edgeTarget = v;
+        polyline._edgeDist = dist;
+        polyline._edgeThresh = thresh;
+
+        polyline.bindTooltip(
+            `<div style="font-family: Inter, sans-serif; font-size: 11px; line-height: 1.45; padding: 2px 4px;">` +
+            `<div style="color: #f43f5e; font-weight: 800; display: flex; align-items: center; gap: 4px; margin-bottom: 3px;">` +
+            `<span>⚡ Conflict Edge</span> <span style="font-size: 10px; background: rgba(244,63,94,0.15); padding: 1px 4px; border-radius: 3px; border: 1px solid rgba(244,63,94,0.3);">${dist} m</span>` +
+            `</div>` +
+            `<div>Tower <b>${uLabel}</b> (${uRadio}) ↔ Tower <b>${vLabel}</b> (${vRadio})</div>` +
+            `<div style="color: #94a3b8; font-size: 10px; margin-top: 2px;">Separation: <b>${dist} m</b> ≤ Overlap Limit: <b>${thresh} m</b></div>` +
+            `</div>`,
+            { sticky: true, className: "conflict-edge-tooltip" }
+        );
+
+        polyline.on("mouseover", function () {
+            this.setStyle({ color: "#fb7185", weight: 5.0, opacity: 1.0 });
+            if (this.bringToFront) this.bringToFront();
+        });
+        polyline.on("mouseout", function () {
+            if (state.selectedTowerId) {
+                if (this._edgeSource === state.selectedTowerId || this._edgeTarget === state.selectedTowerId) {
+                    this.setStyle({ color: "#38bdf8", weight: 4.5, opacity: 1.0, dashArray: null });
+                } else {
+                    this.setStyle({ color: "#f43f5e", weight: 1.2, opacity: 0.12, dashArray: "4, 6" });
+                }
+            } else {
+                this.setStyle({ color: "#f43f5e", weight: 3.0, opacity: 0.85, dashArray: "7, 5" });
+            }
+        });
+
+        polyline.addTo(state.edgesLayer);
+    });
 }
 
 function applyActiveColoring() {
@@ -926,7 +1168,7 @@ function applyActiveColoring() {
             const ch = coloring[tid];
             if (ch !== undefined) {
                 const color = getFrequencyColor(Number(ch));
-                circle.setStyle({ fill: true, fillColor: color, fillOpacity: state.coverageOpacity || 0.18, color, weight: 2.0, opacity: 0.85 });
+                circle.setStyle({ fill: true, fillColor: color, fillOpacity: state.coverageOpacity || 0.14, color, weight: 1.6, opacity: 0.65 });
             }
         });
     }

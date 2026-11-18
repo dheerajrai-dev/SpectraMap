@@ -404,9 +404,15 @@ def parse_opencellid_response(payload: Any) -> tuple[list[dict[str, Any]], list[
 
 
 def get_cache_filepath(bbox_str: str, cache_dir: Path | str = "data") -> Path:
-    """Return local cache file path for a given bounding box string."""
-    safe_name = f"cache_{bbox_str.replace(',', '_')}.json"
-    return Path(cache_dir) / safe_name
+    """Return local cache file path for a given bounding box string with traversal protection."""
+    safe_bbox = "".join(c for c in bbox_str.replace(",", "_") if c.isalnum() or c in "._-")
+    safe_name = f"cache_{safe_bbox}.json"
+    base = Path(cache_dir).resolve()
+    target = (base / safe_name).resolve()
+    # Guard against directory traversal
+    if not str(target).startswith(str(base)):
+        raise ValueError(f"Invalid bounding box cache path: {bbox_str}")
+    return target
 
 
 def save_cache(

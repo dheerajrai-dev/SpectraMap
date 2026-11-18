@@ -14,11 +14,13 @@ Serves the static frontend and exposes the JSON API:
 import os
 import time
 import uuid
+import logging
 from typing import Any
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 from data_service import (
     fetch_opencellid_records,
@@ -50,11 +52,51 @@ from schemas import (
 # Load environment variables from .env file
 load_dotenv()
 
+# Configure production-ready logging
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, log_level, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("spectramap")
+
 app = FastAPI(
     title="SpectraMap",
     version="2.0",
     description="Spatial Graph Coloring for Cellular Frequency Optimization",
 )
+
+# CORS configuration
+raw_cors = os.getenv("CORS_ORIGINS", "*")
+cors_origins = [o.strip() for o in raw_cors.split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins if cors_origins != ["*"] else ["*"],
+    allow_credentials=True if cors_origins != ["*"] else False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Add defensive HTTP security headers to all responses."""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    return response
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Graceful error handler preventing unhandled internal stack traces from leaking."""
+    logger.exception("Unhandled server exception on %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An internal server error occurred while processing the request."},
+    )
 
 # Serve frontend static assets under the /static URL prefix
 app.mount("/static", StaticFiles(directory="static"), name="static")
